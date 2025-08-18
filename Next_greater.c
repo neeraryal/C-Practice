@@ -74,16 +74,48 @@ void print_stack()
 
 int main()
 {
-    push(3);
-    push(32);
-    push(12);
+    int n ;
+    printf("Enter the size of the array : ");
+    scanf("%d",&n);
 
-    print_stack();
+    int *arr= (int*) malloc (n * sizeof(int));
+    printf("Enter the values : ");
+    for (int i=0 ;i<n;i++)
+    {
+        scanf("%d",&arr[i]);
+    }
+    printf("Array elements :");
+    for (int i=0 ;i<n;i++)
+    {
+        printf(" %d ",arr[i]);
+    }
+    printf("\n");  //2,1,2,4,3
 
-    pop();
+    int * ans = calloc(sizeof(int) ,n); 
+    for(int i=0 ; i<n ;i++)
+    {
+        while(top !=NULL  && arr[i]> arr[peek()])
+        {
+            int top_val=pop();
+            ans[top_val]=arr[i];
+        }
+        push(i);
+    }
+    
+    while(top !=NULL)
+    {
+        ans[peek()]=-1;
+        pop();
+    }
 
-    print_stack();
-    push(10);
-    print_stack();
+    for (int i=0 ;i<n;i++)
+    {
+        printf(" %d ",ans[i]);
+    }
+
+    printf("\n");
+
+    free(arr);
+    free(ans);
     return 0; 
 }
