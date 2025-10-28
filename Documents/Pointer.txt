@@ -1,279 +1,462 @@
-====================================================================
-        POINTER CONST-CORRECTNESS — MASTER GUIDE (C)
-====================================================================
-
---------------------------------------------------------------------
-1. THE RIGHT-TO-LEFT RULE
---------------------------------------------------------------------
-Read pointer declarations from right to left.
-
-    int *p
-        p is a pointer to int
-
-    const int *p
-        p is a pointer to const int
-        (data immutable via p)
-
-    int * const p
-        p is a const pointer to int
-        (address immutable)
-
-    const int * const p
-        p is a const pointer to const int
-        (both locked)
-
---------------------------------------------------------------------
-2. THE LOGIC OF "PERMISSIONS"
---------------------------------------------------------------------
-const is a restriction on the ACCESS PATH, not necessarily on memory.
-
-    int x = 10;
-    const int *p = &x;
-
-    *p = 20;   // ERROR
-    x  = 20;   // OK
-
-x is mutable.
-p only provides a read-only VIEW of x.
-
-Two kinds of const:
-
-    Physical const:
-        const int x;
-        Object itself is immutable (may live in ROM).
-
-    Logical const:
-        const int *p;
-        Compiler prevents mutation THROUGH p only.
-
---------------------------------------------------------------------
-3. DOUBLE POINTERS (**)
---------------------------------------------------------------------
-With **, there are THREE independent levels of mutability.
-
-    Level 1: **pp   -> final data
-    Level 2: *pp    -> inner pointer
-    Level 3: pp     -> outer pointer
-
-Examples:
-
-    const int **pp
-        Data protected
-        Inner pointer mutable
-        DANGEROUS (breaks const safety)
-
-    int * const *pp
-        Inner pointer protected
-        Data mutable
-
-    int ** const pp
-        Outer pointer protected
-
---------------------------------------------------------------------
-4. CRITICAL WARNINGS
---------------------------------------------------------------------
-
-A) Dropping const (ILLEGAL)
-
-    const int *cp;
-    int *p = cp;      // ERROR (removes protection)
-
-B) Casting away const
-
-    (int *)p
-
-This bypasses safety checks.
-Using it to modify data originally declared const is UNDEFINED BEHAVIOR.
-
-C) Double-pointer security rule
-
-    int **  -> const int **   // NOT allowed
-
-Reason:
-    Prevents a backdoor where const data could be mutated
-    through pointer re-routing.
-
---------------------------------------------------------------------
-5. FUNCTION PARAMETERS
---------------------------------------------------------------------
-
-Read-only guarantee:
-
-    void f(const int *p);
-
-Meaning:
-    Function promises not to modify caller data.
-
-Const pointer parameter:
-
-    void f(int * const p);
-
-Usually useless noise.
-Pointers are already passed by value.
-
---------------------------------------------------------------------
-====================================================================
-        C POINTERS — CORE FOUNDATION
-====================================================================
-
---------------------------------------------------------------------
-1. WHAT A POINTER IS
---------------------------------------------------------------------
-A pointer is a variable that stores an ADDRESS.
-
-Pointer type describes WHAT lives at the address,
-not the address itself.
-
-    int x;
-    int *p = &x;
-
---------------------------------------------------------------------
-2. DEREFERENCING (*)
---------------------------------------------------------------------
-
-    p   -> address
-    *p  -> value at address
-
-    * on RHS  -> read
-    * on LHS  -> write
-
-    *p = 10;   // write
-    x  = *p;   // read
-
---------------------------------------------------------------------
-3. PASS-BY-VALUE (NO EXCEPTIONS)
---------------------------------------------------------------------
-C ALWAYS passes by value.
-
-    int      -> value copied
-    int *    -> address copied
-
-Data changes work because multiple pointers
-refer to the same memory.
-
-Pointer reassignment does NOT affect caller.
-
-To modify caller’s pointer:
-
-    void f(int **p) {
-        *p = NULL;
-    }
-
---------------------------------------------------------------------
-4. POINTER ARITHMETIC
---------------------------------------------------------------------
-
-Pointer increments scale by sizeof(type).
-
-    p + 1 != address + 1 byte
-
-    *(p + i) == p[i]
-
---------------------------------------------------------------------
-5. ARRAYS VS POINTERS
---------------------------------------------------------------------
-
-Array name decays to pointer to first element.
-
-BUT:
-
-    sizeof(array)   != sizeof(pointer)
-
---------------------------------------------------------------------
-6. NULL POINTER
---------------------------------------------------------------------
-
-NULL means "points to nothing valid".
-
-Dereferencing NULL => UNDEFINED BEHAVIOR.
-
---------------------------------------------------------------------
-====================================================================
-        CONST WITH POINTERS (MOST IMPORTANT)
-====================================================================
-
---------------------------------------------------------------------
-7. CONST APPLIES TO ACCESS PATH
---------------------------------------------------------------------
-
-    int x;
-    const int *p = &x;
-
-x is mutable.
-Access through p is read-only.
-
---------------------------------------------------------------------
-8. SINGLE-LEVEL CONST MATRIX (MEMORIZE)
---------------------------------------------------------------------
-
-Declaration              Pointer   Data
-----------------------------------------
-int *p                   mutable   mutable
-const int *p             mutable   const
-int * const p            const     mutable
-const int * const p      const     const
-
---------------------------------------------------------------------
-9. CONST CONVERSION RULE
---------------------------------------------------------------------
-
-You may ADD const.
-You may NEVER REMOVE const.
-
-    int *        -> const int *   OK
-    const int *  -> int *         ERROR
-
---------------------------------------------------------------------
-10. WHY POINTER-TO-POINTER (**)
---------------------------------------------------------------------
-
-Required when a function must:
-
-    - Allocate memory
-    - Free memory and NULL the pointer
-    - Reassign ownership
-    - Update list / tree heads
-
-    void alloc(int **p);
-
---------------------------------------------------------------------
-11. CONST WITH ** (CRITICAL RULE)
---------------------------------------------------------------------
-
-NEVER DO THIS:
-
-    const int **pp;
-
-Why:
-    - Allows pointer re-routing
-    - Breaks const guarantees
-    - Compiler cannot enforce safety
-
-CORRECT, SAFE FORM:
-
-    const int * const *pp;
-
-Meaning:
-    - Data protected
-    - Inner pointer protected
-    - Const guarantee preserved
-
---------------------------------------------------------------------
-12. GOLDEN RULE FOR MULTI-LEVEL CONST
---------------------------------------------------------------------
-
-If the DATA is const,
-EVERY pointer level above it must also be const.
-
---------------------------------------------------------------------
-13. FINAL MENTAL MODEL
---------------------------------------------------------------------
-
-C always copies values.
-Pointers work because values happen to be addresses.
-const restricts ACCESS PATHS, not memory itself.
-Const safety fails when pointer re-routing is allowed.
-
-====================================================================
-END OF GUIDE
-====================================================================
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C Pointer Const-Correctness — Master Guide</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #e0e0e0;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 40px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        h1 {
+            color: #64ffda;
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #a0a0a0;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+        
+        h2 {
+            color: #ff6b6b;
+            margin-top: 40px;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+            border-bottom: 3px solid #ff6b6b;
+            padding-bottom: 10px;
+        }
+        
+        h3 {
+            color: #ffd93d;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+        
+        .code-block {
+            background: #0d1117;
+            border-left: 4px solid #64ffda;
+            padding: 15px 20px;
+            margin: 15px 0;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            color: #c9d1d9;
+        }
+        
+        .code-block code {
+            font-size: 0.95em;
+            line-height: 1.5;
+        }
+        
+        .comment {
+            color: #8b949e;
+        }
+        
+        .warning {
+            background: rgba(255, 107, 107, 0.1);
+            border-left: 4px solid #ff6b6b;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+        
+        .warning strong {
+            color: #ff6b6b;
+        }
+        
+        .info {
+            background: rgba(100, 255, 218, 0.1);
+            border-left: 4px solid #64ffda;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+        
+        .matrix {
+            background: #0d1117;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #30363d;
+        }
+        
+        th {
+            background: #161b22;
+            color: #64ffda;
+            font-weight: bold;
+        }
+        
+        tr:hover {
+            background: rgba(100, 255, 218, 0.05);
+        }
+        
+        .rule {
+            background: rgba(255, 217, 61, 0.1);
+            border-left: 4px solid #ffd93d;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+        
+        ul, ol {
+            margin-left: 30px;
+            margin-top: 10px;
+            margin-bottom: 15px;
+        }
+        
+        li {
+            margin: 8px 0;
+        }
+        
+        strong {
+            color: #64ffda;
+        }
+        
+        .section {
+            margin-bottom: 50px;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+            }
+            
+            h1 {
+                font-size: 1.8em;
+            }
+            
+            h2 {
+                font-size: 1.4em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>POINTER CONST-CORRECTNESS</h1>
+        <p class="subtitle">Master Guide for C Programming</p>
+
+        <div class="section">
+            <h2>1. THE RIGHT-TO-LEFT RULE</h2>
+            <p>Read pointer declarations from right to left.</p>
+            
+            <div class="code-block"><code>int *p
+<span class="comment">    // p is a pointer to int</span>
+
+const int *p
+<span class="comment">    // p is a pointer to const int
+    // (data immutable via p)</span>
+
+int * const p
+<span class="comment">    // p is a const pointer to int
+    // (address immutable)</span>
+
+const int * const p
+<span class="comment">    // p is a const pointer to const int
+    // (both locked)</span></code></div>
+        </div>
+
+        <div class="section">
+            <h2>2. THE LOGIC OF "PERMISSIONS"</h2>
+            <div class="info">
+                <strong>Key Concept:</strong> const is a restriction on the ACCESS PATH, not necessarily on memory.
+            </div>
+            
+            <div class="code-block"><code>int x = 10;
+const int *p = &x;
+
+*p = 20;   <span class="comment">// ERROR</span>
+x  = 20;   <span class="comment">// OK</span></code></div>
+
+            <p>x is mutable. p only provides a <strong>read-only VIEW</strong> of x.</p>
+
+            <h3>Two kinds of const:</h3>
+            <ul>
+                <li><strong>Physical const:</strong> <code>const int x;</code> — Object itself is immutable (may live in ROM).</li>
+                <li><strong>Logical const:</strong> <code>const int *p;</code> — Compiler prevents mutation THROUGH p only.</li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <h2>3. DOUBLE POINTERS (**)</h2>
+            <p>With **, there are <strong>THREE independent levels</strong> of mutability.</p>
+            
+            <div class="rule">
+                <ul>
+                    <li><strong>Level 1:</strong> **pp → final data</li>
+                    <li><strong>Level 2:</strong> *pp → inner pointer</li>
+                    <li><strong>Level 3:</strong> pp → outer pointer</li>
+                </ul>
+            </div>
+
+            <h3>Examples:</h3>
+            <div class="code-block"><code>const int **pp
+<span class="comment">    // Data protected
+    // Inner pointer mutable
+    // DANGEROUS (breaks const safety)</span>
+
+int * const *pp
+<span class="comment">    // Inner pointer protected
+    // Data mutable</span>
+
+int ** const pp
+<span class="comment">    // Outer pointer protected</span></code></div>
+        </div>
+
+        <div class="section">
+            <h2>4. CRITICAL WARNINGS</h2>
+            
+            <div class="warning">
+                <strong>A) Dropping const (ILLEGAL)</strong>
+                <div class="code-block"><code>const int *cp;
+int *p = cp;  <span class="comment">// ERROR (removes protection)</span></code></div>
+            </div>
+
+            <div class="warning">
+                <strong>B) Casting away const</strong>
+                <div class="code-block"><code>(int *)p</code></div>
+                <p>This bypasses safety checks. Using it to modify data originally declared const is <strong>UNDEFINED BEHAVIOR</strong>.</p>
+            </div>
+
+            <div class="warning">
+                <strong>C) Double-pointer security rule</strong>
+                <div class="code-block"><code>int **  -> const int **   <span class="comment">// NOT allowed</span></code></div>
+                <p><strong>Reason:</strong> Prevents a backdoor where const data could be mutated through pointer re-routing.</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>5. FUNCTION PARAMETERS</h2>
+            
+            <h3>Read-only guarantee:</h3>
+            <div class="code-block"><code>void f(const int *p);</code></div>
+            <p><strong>Meaning:</strong> Function promises not to modify caller data.</p>
+
+            <h3>Const pointer parameter:</h3>
+            <div class="code-block"><code>void f(int * const p);</code></div>
+            <p>Usually <strong>useless noise</strong>. Pointers are already passed by value.</p>
+        </div>
+
+        <h1 style="margin-top: 80px;">C POINTERS — CORE FOUNDATION</h1>
+        <p class="subtitle">Essential Concepts</p>
+
+        <div class="section">
+            <h2>1. WHAT A POINTER IS</h2>
+            <p>A pointer is a variable that stores an <strong>ADDRESS</strong>.</p>
+            <div class="info">
+                Pointer type describes WHAT lives at the address, not the address itself.
+            </div>
+            <div class="code-block"><code>int x;
+int *p = &x;</code></div>
+        </div>
+
+        <div class="section">
+            <h2>2. DEREFERENCING (*)</h2>
+            <div class="code-block"><code>p   <span class="comment">// address</span>
+*p  <span class="comment">// value at address</span>
+
+<span class="comment">// * on RHS  -> read
+// * on LHS  -> write</span>
+
+*p = 10;   <span class="comment">// write</span>
+x  = *p;   <span class="comment">// read</span></code></div>
+        </div>
+
+        <div class="section">
+            <h2>3. PASS-BY-VALUE (NO EXCEPTIONS)</h2>
+            <div class="rule">
+                C ALWAYS passes by value.
+            </div>
+            <ul>
+                <li><code>int</code> → value copied</li>
+                <li><code>int *</code> → address copied</li>
+            </ul>
+            <p>Data changes work because multiple pointers refer to the same memory.</p>
+            <p>Pointer reassignment does NOT affect caller.</p>
+
+            <h3>To modify caller's pointer:</h3>
+            <div class="code-block"><code>void f(int **p) {
+    *p = NULL;
+}</code></div>
+        </div>
+
+        <div class="section">
+            <h2>4. POINTER ARITHMETIC</h2>
+            <div class="info">
+                Pointer increments scale by sizeof(type).
+            </div>
+            <div class="code-block"><code>p + 1 != address + 1 byte
+
+*(p + i) == p[i]</code></div>
+        </div>
+
+        <div class="section">
+            <h2>5. ARRAYS VS POINTERS</h2>
+            <p>Array name decays to pointer to first element.</p>
+            <div class="warning">
+                <strong>BUT:</strong> <code>sizeof(array) != sizeof(pointer)</code>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>6. NULL POINTER</h2>
+            <p>NULL means "points to nothing valid".</p>
+            <div class="warning">
+                Dereferencing NULL ⇒ <strong>UNDEFINED BEHAVIOR</strong>
+            </div>
+        </div>
+
+        <h1 style="margin-top: 80px;">CONST WITH POINTERS</h1>
+        <p class="subtitle">Most Important Section</p>
+
+        <div class="section">
+            <h2>7. CONST APPLIES TO ACCESS PATH</h2>
+            <div class="code-block"><code>int x;
+const int *p = &x;</code></div>
+            <p>x is mutable. Access through p is read-only.</p>
+        </div>
+
+        <div class="section">
+            <h2>8. SINGLE-LEVEL CONST MATRIX (MEMORIZE)</h2>
+            <div class="matrix">
+                <table>
+                    <tr>
+                        <th>Declaration</th>
+                        <th>Pointer</th>
+                        <th>Data</th>
+                    </tr>
+                    <tr>
+                        <td><code>int *p</code></td>
+                        <td>mutable</td>
+                        <td>mutable</td>
+                    </tr>
+                    <tr>
+                        <td><code>const int *p</code></td>
+                        <td>mutable</td>
+                        <td>const</td>
+                    </tr>
+                    <tr>
+                        <td><code>int * const p</code></td>
+                        <td>const</td>
+                        <td>mutable</td>
+                    </tr>
+                    <tr>
+                        <td><code>const int * const p</code></td>
+                        <td>const</td>
+                        <td>const</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>9. CONST CONVERSION RULE</h2>
+            <div class="rule">
+                <p>✅ You may <strong>ADD</strong> const.</p>
+                <p>❌ You may <strong>NEVER REMOVE</strong> const.</p>
+            </div>
+            <div class="code-block"><code>int *        -> const int *   <span class="comment">// OK</span>
+const int *  -> int *         <span class="comment">// ERROR</span></code></div>
+        </div>
+
+        <div class="section">
+            <h2>10. WHY POINTER-TO-POINTER (**)</h2>
+            <p>Required when a function must:</p>
+            <ul>
+                <li>Allocate memory</li>
+                <li>Free memory and NULL the pointer</li>
+                <li>Reassign ownership</li>
+                <li>Update list / tree heads</li>
+            </ul>
+            <div class="code-block"><code>void alloc(int **p);</code></div>
+        </div>
+
+        <div class="section">
+            <h2>11. CONST WITH ** (CRITICAL RULE)</h2>
+            <div class="warning">
+                <strong>NEVER DO THIS:</strong>
+                <div class="code-block"><code>const int **pp;</code></div>
+                <p><strong>Why:</strong></p>
+                <ul>
+                    <li>Allows pointer re-routing</li>
+                    <li>Breaks const guarantees</li>
+                    <li>Compiler cannot enforce safety</li>
+                </ul>
+            </div>
+
+            <div class="info">
+                <strong>CORRECT, SAFE FORM:</strong>
+                <div class="code-block"><code>const int * const *pp;</code></div>
+                <p><strong>Meaning:</strong></p>
+                <ul>
+                    <li>Data protected</li>
+                    <li>Inner pointer protected</li>
+                    <li>Const guarantee preserved</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>12. GOLDEN RULE FOR MULTI-LEVEL CONST</h2>
+            <div class="rule">
+                <strong>If the DATA is const, EVERY pointer level above it must also be const.</strong>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>13. FINAL MENTAL MODEL</h2>
+            <ul>
+                <li>C always copies values.</li>
+                <li>Pointers work because values happen to be addresses.</li>
+                <li>const restricts ACCESS PATHS, not memory itself.</li>
+                <li>Const safety fails when pointer re-routing is allowed.</li>
+            </ul>
+        </div>
+
+        <div style="text-align: center; margin-top: 60px; padding-top: 30px; border-top: 2px solid rgba(100, 255, 218, 0.3); color: #64ffda;">
+            <strong>END OF GUIDE</strong>
+        </div>
+    </div>
+</body>
+</html>
