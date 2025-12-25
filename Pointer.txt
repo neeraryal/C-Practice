@@ -1,0 +1,279 @@
+====================================================================
+        POINTER CONST-CORRECTNESS — MASTER GUIDE (C)
+====================================================================
+
+--------------------------------------------------------------------
+1. THE RIGHT-TO-LEFT RULE
+--------------------------------------------------------------------
+Read pointer declarations from right to left.
+
+    int *p
+        p is a pointer to int
+
+    const int *p
+        p is a pointer to const int
+        (data immutable via p)
+
+    int * const p
+        p is a const pointer to int
+        (address immutable)
+
+    const int * const p
+        p is a const pointer to const int
+        (both locked)
+
+--------------------------------------------------------------------
+2. THE LOGIC OF "PERMISSIONS"
+--------------------------------------------------------------------
+const is a restriction on the ACCESS PATH, not necessarily on memory.
+
+    int x = 10;
+    const int *p = &x;
+
+    *p = 20;   // ERROR
+    x  = 20;   // OK
+
+x is mutable.
+p only provides a read-only VIEW of x.
+
+Two kinds of const:
+
+    Physical const:
+        const int x;
+        Object itself is immutable (may live in ROM).
+
+    Logical const:
+        const int *p;
+        Compiler prevents mutation THROUGH p only.
+
+--------------------------------------------------------------------
+3. DOUBLE POINTERS (**)
+--------------------------------------------------------------------
+With **, there are THREE independent levels of mutability.
+
+    Level 1: **pp   -> final data
+    Level 2: *pp    -> inner pointer
+    Level 3: pp     -> outer pointer
+
+Examples:
+
+    const int **pp
+        Data protected
+        Inner pointer mutable
+        DANGEROUS (breaks const safety)
+
+    int * const *pp
+        Inner pointer protected
+        Data mutable
+
+    int ** const pp
+        Outer pointer protected
+
+--------------------------------------------------------------------
+4. CRITICAL WARNINGS
+--------------------------------------------------------------------
+
+A) Dropping const (ILLEGAL)
+
+    const int *cp;
+    int *p = cp;      // ERROR (removes protection)
+
+B) Casting away const
+
+    (int *)p
+
+This bypasses safety checks.
+Using it to modify data originally declared const is UNDEFINED BEHAVIOR.
+
+C) Double-pointer security rule
+
+    int **  -> const int **   // NOT allowed
+
+Reason:
+    Prevents a backdoor where const data could be mutated
+    through pointer re-routing.
+
+--------------------------------------------------------------------
+5. FUNCTION PARAMETERS
+--------------------------------------------------------------------
+
+Read-only guarantee:
+
+    void f(const int *p);
+
+Meaning:
+    Function promises not to modify caller data.
+
+Const pointer parameter:
+
+    void f(int * const p);
+
+Usually useless noise.
+Pointers are already passed by value.
+
+--------------------------------------------------------------------
+====================================================================
+        C POINTERS — CORE FOUNDATION
+====================================================================
+
+--------------------------------------------------------------------
+1. WHAT A POINTER IS
+--------------------------------------------------------------------
+A pointer is a variable that stores an ADDRESS.
+
+Pointer type describes WHAT lives at the address,
+not the address itself.
+
+    int x;
+    int *p = &x;
+
+--------------------------------------------------------------------
+2. DEREFERENCING (*)
+--------------------------------------------------------------------
+
+    p   -> address
+    *p  -> value at address
+
+    * on RHS  -> read
+    * on LHS  -> write
+
+    *p = 10;   // write
+    x  = *p;   // read
+
+--------------------------------------------------------------------
+3. PASS-BY-VALUE (NO EXCEPTIONS)
+--------------------------------------------------------------------
+C ALWAYS passes by value.
+
+    int      -> value copied
+    int *    -> address copied
+
+Data changes work because multiple pointers
+refer to the same memory.
+
+Pointer reassignment does NOT affect caller.
+
+To modify caller’s pointer:
+
+    void f(int **p) {
+        *p = NULL;
+    }
+
+--------------------------------------------------------------------
+4. POINTER ARITHMETIC
+--------------------------------------------------------------------
+
+Pointer increments scale by sizeof(type).
+
+    p + 1 != address + 1 byte
+
+    *(p + i) == p[i]
+
+--------------------------------------------------------------------
+5. ARRAYS VS POINTERS
+--------------------------------------------------------------------
+
+Array name decays to pointer to first element.
+
+BUT:
+
+    sizeof(array)   != sizeof(pointer)
+
+--------------------------------------------------------------------
+6. NULL POINTER
+--------------------------------------------------------------------
+
+NULL means "points to nothing valid".
+
+Dereferencing NULL => UNDEFINED BEHAVIOR.
+
+--------------------------------------------------------------------
+====================================================================
+        CONST WITH POINTERS (MOST IMPORTANT)
+====================================================================
+
+--------------------------------------------------------------------
+7. CONST APPLIES TO ACCESS PATH
+--------------------------------------------------------------------
+
+    int x;
+    const int *p = &x;
+
+x is mutable.
+Access through p is read-only.
+
+--------------------------------------------------------------------
+8. SINGLE-LEVEL CONST MATRIX (MEMORIZE)
+--------------------------------------------------------------------
+
+Declaration              Pointer   Data
+----------------------------------------
+int *p                   mutable   mutable
+const int *p             mutable   const
+int * const p            const     mutable
+const int * const p      const     const
+
+--------------------------------------------------------------------
+9. CONST CONVERSION RULE
+--------------------------------------------------------------------
+
+You may ADD const.
+You may NEVER REMOVE const.
+
+    int *        -> const int *   OK
+    const int *  -> int *         ERROR
+
+--------------------------------------------------------------------
+10. WHY POINTER-TO-POINTER (**)
+--------------------------------------------------------------------
+
+Required when a function must:
+
+    - Allocate memory
+    - Free memory and NULL the pointer
+    - Reassign ownership
+    - Update list / tree heads
+
+    void alloc(int **p);
+
+--------------------------------------------------------------------
+11. CONST WITH ** (CRITICAL RULE)
+--------------------------------------------------------------------
+
+NEVER DO THIS:
+
+    const int **pp;
+
+Why:
+    - Allows pointer re-routing
+    - Breaks const guarantees
+    - Compiler cannot enforce safety
+
+CORRECT, SAFE FORM:
+
+    const int * const *pp;
+
+Meaning:
+    - Data protected
+    - Inner pointer protected
+    - Const guarantee preserved
+
+--------------------------------------------------------------------
+12. GOLDEN RULE FOR MULTI-LEVEL CONST
+--------------------------------------------------------------------
+
+If the DATA is const,
+EVERY pointer level above it must also be const.
+
+--------------------------------------------------------------------
+13. FINAL MENTAL MODEL
+--------------------------------------------------------------------
+
+C always copies values.
+Pointers work because values happen to be addresses.
+const restricts ACCESS PATHS, not memory itself.
+Const safety fails when pointer re-routing is allowed.
+
+====================================================================
+END OF GUIDE
+====================================================================
