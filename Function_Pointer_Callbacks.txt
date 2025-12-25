@@ -1,0 +1,300 @@
+============================================================
+FUNCTION POINTERS & CALLBACKS IN C — MENTAL MODEL (REVISION)
+============================================================
+
+PURPOSE
+-------
+This document explains:
+1) What a function pointer REALLY is
+2) Why callbacks exist
+3) How callback registration works
+4) The exact mental model to reason about callbacks
+5) A minimal, correct example
+
+Read this when confused. This is the ground truth.
+
+
+============================================================
+1. CORE MENTAL MODEL (NON-NEGOTIABLE)
+============================================================
+
+1. A function in C has an ADDRESS (just like a variable).
+2. A function pointer is a VARIABLE that stores that address.
+3. A callback is NOT special:
+   - It is JUST a function pointer
+   - Passed/stored so it can be called later
+4. "Registering a callback" means:
+   - Store a function’s address somewhere safe
+5. "Triggering a callback" means:
+   - Jump to that stored address and execute code
+
+That’s it.
+No magic. No hidden mechanism.
+
+
+============================================================
+2. WHY CALLBACKS EXIST (THE REAL REASON)
+============================================================
+
+If a function HARD-CODES another function call inside it:
+
+    download() → notify()
+
+Then:
+- Behavior is FIXED
+- Code is NOT reusable
+- Library controls the user (bad)
+
+Callbacks invert control:
+
+    user decides WHAT happens
+    system decides WHEN it happens
+
+This is called:
+    "Inversion of Control"
+
+ALL of these depend on callbacks:
+- Interrupt handlers
+- RTOS tasks
+- Drivers
+- Event systems
+- HAL libraries
+- Linux kernel hooks
+
+
+============================================================
+3. FUNCTION POINTER SYNTAX — MENTAL RULE
+============================================================
+
+RULE:
+-----
+"typedef syntax is IDENTICAL to variable declaration syntax."
+
+If this is valid:
+    void (*ptr)(int);
+
+Then typedef is:
+    typedef void (*TYPE_NAME)(int);
+
+Nothing new. No exception.
+
+Parentheses EXIST because:
+    * has lower precedence than ()
+
+Without parentheses:
+    void *f(int);   // function returning pointer (WRONG)
+
+
+============================================================
+4. CALLBACK TYPE DEFINITION
+============================================================
+
+Define the SHAPE of callbacks once.
+
+Example:
+--------
+typedef void (*cb_hello_print)(void);
+
+Meaning:
+---------
+cb_hello_print is a TYPE that represents:
+    pointer to function
+    returning void
+    taking no arguments
+
+
+============================================================
+5. CALLBACK STORAGE (REGISTRATION SLOT)
+============================================================
+
+You MUST store the callback somewhere.
+
+Example:
+--------
+cb_hello_print print_hello_ptr = NULL;
+
+Mental model:
+-------------
+print_hello_ptr is:
+- Empty (NULL) → no callback registered
+- Non-NULL     → valid function address stored
+
+
+============================================================
+6. REGISTER / DEREGISTER — WHAT REALLY HAPPENS
+============================================================
+
+REGISTER:
+---------
+void register_hello_print_callback(cb_hello_print cb)
+{
+    print_hello_ptr = cb;
+}
+
+Meaning:
+---------
+Store function address for later use.
+
+
+DEREGISTER:
+-----------
+void de_register_hello_print_callback()
+{
+    print_hello_ptr = NULL;
+}
+
+Meaning:
+---------
+Forget the function address.
+
+
+============================================================
+7. SAFE CALLBACK USAGE RULE (MANDATORY)
+============================================================
+
+RULE:
+-----
+NEVER call a callback without checking NULL.
+
+Why:
+----
+Calling NULL = jump to address 0 = crash / undefined behavior
+
+Correct:
+--------
+if (print_hello_ptr != NULL)
+    print_hello_ptr();
+
+
+============================================================
+8. CALLBACK IMPLEMENTATIONS (USER SIDE)
+============================================================
+
+These are NORMAL functions.
+No special syntax.
+
+Example:
+--------
+void greet_bhai(void)
+{
+    printf("Hello Bhai !!\n");
+}
+
+void greet_bhen(void)
+{
+    printf("Hello Bhen !!\n");
+}
+
+
+============================================================
+9. EVENT / TRIGGER FUNCTION (CORE IDEA)
+============================================================
+
+This function DOES NOT know:
+- Which function will be called
+- What that function does
+
+It ONLY knows:
+- IF callback exists → call it
+
+Example:
+--------
+void greetings()
+{
+    printf("Hi, ");
+
+    if (print_hello_ptr != NULL)
+        print_hello_ptr();
+    else
+        printf("Register the callback first.\n");
+}
+
+
+============================================================
+10. COMPLETE MINIMAL EXAMPLE
+============================================================
+
+#include <stdio.h>
+
+typedef void (*cb_hello_print)(void);
+
+cb_hello_print print_hello_ptr = NULL;
+
+void greet_bhai(void)
+{
+    printf("Hello Bhai !!\n");
+}
+
+void greet_bhen(void)
+{
+    printf("Hello Bhen !!\n");
+}
+
+void register_hello_print_callback(cb_hello_print cb)
+{
+    print_hello_ptr = cb;
+}
+
+void de_register_hello_print_callback(void)
+{
+    print_hello_ptr = NULL;
+}
+
+void greetings(void)
+{
+    printf("Hi, ");
+
+    if (print_hello_ptr != NULL)
+        print_hello_ptr();
+    else
+        printf("Register the callback first.\n");
+}
+
+int main(void)
+{
+    register_hello_print_callback(greet_bhai);
+    greetings();
+
+    de_register_hello_print_callback();
+    greetings();
+
+    return 0;
+}
+
+
+============================================================
+11. EXECUTION TRACE (MENTAL DRY RUN)
+============================================================
+
+1. register_hello_print_callback(greet_bhai)
+   → store address of greet_bhai
+
+2. greetings()
+   → print "Hi, "
+   → callback exists
+   → jump to greet_bhai()
+
+3. de_register_hello_print_callback()
+   → callback pointer = NULL
+
+4. greetings()
+   → print "Hi, "
+   → no callback → print warning
+
+
+============================================================
+12. ONE-LINE MEMORY ANCHORS (EXAM / INTERVIEW)
+============================================================
+
+• Function pointer = variable storing function address
+• Callback = function pointer called later
+• Register = store function address
+• Trigger = call stored address
+• typedef ≠ magic, only a name
+• Parentheses control meaning
+• NULL check is mandatory
+
+
+============================================================
+END OF FILE
+============================================================
