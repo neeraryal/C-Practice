@@ -1,0 +1,62 @@
+```md
+sequenceDiagram
+    participant HW as Hardware
+    participant Boot as Bootloader
+    participant RF as RF Subsystem
+    participant ESP as ESP32
+    participant AP as Access Point
+    participant DHCP as DHCP Server
+    participant mDNS as mDNS Network<br/>(224.0.0.251:5353)
+
+    Note over HW,RF: Hardware Initialization Phase
+    HW->>Boot: Power Applied (3.3V)
+    Boot->>Boot: Load Firmware from Flash
+    Boot->>RF: Initialize Radio Hardware
+    RF->>RF: RF Calibration<br/>(PHY init, TX power, freq offset)
+    RF-->>ESP: Radio Ready
+
+    Note over ESP,AP: Layer 2: Scanning Phase
+    ESP->>AP: Probe Request<br/>SSID: "MyHomeWiFi"<br/>Supported Rates: 1,2,5.5,11 Mbps
+    AP-->>ESP: Probe Response<br/>BSSID: AA:BB:CC:DD:EE:FF<br/>Channel: 6, RSSI: -45 dBm<br/>Security: WPA2-PSK
+    
+    Note over ESP,AP: Layer 2: Authentication & Association
+    ESP->>AP: Open System Authentication Request<br/>Auth Algorithm: Open (0x0000)
+    AP-->>ESP: Authentication Response<br/>Status: Success (0x0000)
+    
+    ESP->>AP: Association Request<br/>SSID: "MyHomeWiFi"<br/>Capabilities: ESS, Privacy<br/>RSN IE: WPA2-PSK-CCMP
+    AP-->>ESP: Association Response<br/>Status: Success (0x0000)<br/>AID: 1
+
+    Note over ESP,AP: Layer 2: 4-Way Handshake (WPA2-PSK)
+    AP->>ESP: EAPOL Message 1/4<br/>ANonce (32 bytes random)
+    ESP->>ESP: Generate SNonce<br/>Derive PTK from PMK+ANonce+SNonce
+    ESP->>AP: EAPOL Message 2/4<br/>SNonce + MIC
+    AP->>AP: Verify MIC<br/>Derive PTK
+    AP->>ESP: EAPOL Message 3/4<br/>GTK (Group Temporal Key) + MIC
+    ESP->>AP: EAPOL Message 4/4<br/>MIC (Confirm GTK)
+    
+    Note over ESP: WiFi Status: WL_CONNECTED<br/>MAC Layer Ready
+    
+    Note over ESP,DHCP: Layer 3: DHCP IP Acquisition
+    ESP->>DHCP: DHCP DISCOVER (broadcast)<br/>src: 0.0.0.0:68<br/>dst: 255.255.255.255:67<br/>Client MAC: 24:0A:C4:XX:XX:XX
+    DHCP-->>ESP: DHCP OFFER<br/>Your IP: 192.168.1.50<br/>Server: 192.168.1.1<br/>Lease: 86400s (24h)
+    
+    ESP->>DHCP: DHCP REQUEST (broadcast)<br/>Requested IP: 192.168.1.50<br/>Server Identifier: 192.168.1.1
+    DHCP-->>ESP: DHCP ACK<br/>IP: 192.168.1.50<br/>Subnet: 255.255.255.0<br/>Gateway: 192.168.1.1<br/>DNS: 8.8.8.8, 8.8.4.4
+    
+    Note over ESP: netif Bound<br/>IP: 192.168.1.50/24<br/>GW: 192.168.1.1
+    
+    Note over ESP,mDNS: mDNS Hostname Resolution
+    ESP->>mDNS: mDNS Query (Probe)<br/>dst: 224.0.0.251:5353<br/>"Is esp.local taken?"<br/>Question: esp.local ANY<br/>Authority: esp.local A 192.168.1.50
+    
+    Note over ESP: Wait for Conflict<br/>Timeout: 250ms
+    
+    alt No Conflict Response
+        ESP->>mDNS: mDNS Announcement<br/>dst: 224.0.0.251:5353<br/>Answer: esp.local A 192.168.1.50<br/>TTL: 120s<br/>Cache Flush: True
+        Note over ESP: Hostname Active<br/>esp.local → 192.168.1.50
+    else Conflict Detected
+        mDNS-->>ESP: Conflict Response<br/>"esp.local is already used"
+        ESP->>ESP: Rename to esp-2.local
+        ESP->>mDNS: Retry Probe with new name
+    end
+    
+    Note over ESP: System Ready<br/>Network Services Active<br/>HTTP/MQTT/etc. can start
