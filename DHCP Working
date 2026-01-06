@@ -1,5 +1,5 @@
 ```mermaid
-sequenceDiagram
+    sequenceDiagram
     participant HW as Hardware
     participant Boot as Bootloader
     participant RF as RF Subsystem
