@@ -1,4 +1,4 @@
-```md
+```mermaid
 sequenceDiagram
     participant HW as Hardware
     participant Boot as Bootloader
