@@ -60,3 +60,4 @@ sequenceDiagram
     end
     
     Note over ESP: System Ready<br/>Network Services Active<br/>HTTP/MQTT/etc. can start
+```
