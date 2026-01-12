@@ -21,9 +21,6 @@ int main() {
     printf("%d \n",arr1[4][4]);
     return 0;
 }
-
-########################################################################
-
 // Online C compiler to run C program online
 #include <stdio.h>
 #include <stdlib.h>
