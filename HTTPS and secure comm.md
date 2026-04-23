@@ -1,0 +1,375 @@
+# HTTPS & Secure Communication — Complete Notes
+
+---
+
+## 1. Three Core Problems HTTPS Solves
+
+| Problem | Solution |
+|---------|----------|
+| Eavesdropping | Encryption (Symmetric) |
+| Impersonation | Authentication (Certificate + CA) |
+| Tampering | Integrity (Hash / HMAC) |
+
+---
+
+## 2. Encryption Types
+
+### Symmetric Encryption
+- Same key encrypt + decrypt
+- Fast — used for actual data
+- Problem: how share key over public internet safely?
+
+### Asymmetric Encryption
+- Two keys: Public Key (share freely) + Private Key (never share)
+- Encrypt with public key → only private key can decrypt
+- Slow — used only for key exchange / handshake
+
+### How Both Work Together
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: Asymmetric Phase (Key Exchange)
+    S-->>C: Send Public Key (inside Certificate)
+    C->>C: Generate random Session Key
+    C->>S: Encrypt Session Key with Server Public Key
+    S->>S: Decrypt with Server Private Key → get Session Key
+
+    Note over C,S: Symmetric Phase (Actual Data)
+    C->>S: Data encrypted with Session Key
+    S->>C: Response encrypted with Session Key
+```
+
+---
+
+## 3. Authentication — Certificates & CA
+
+### The Problem
+Anyone can claim "I am google.com" and publish a public key.
+Without verification = attacker impersonates server.
+
+### Solution: Certificate Authority (CA)
+
+```mermaid
+flowchart TD
+    A[Server Owner] -->|Proves domain ownership| B[Certificate Authority CA]
+    B -->|Signs certificate with CA Private Key| C[Digital Certificate]
+    C -->|Contains| D[Server Public Key]
+    C -->|Contains| E[Domain Name]
+    C -->|Contains| F[CA Signature]
+    C -->|Contains| G[Expiry Date]
+```
+
+### How Client Verifies Certificate
+
+```mermaid
+flowchart TD
+    A[Receive Certificate from Server] --> B{CA Signature Valid?}
+    B -->|Decrypt signature with CA Public Key| C{Hash Match?}
+    C -->|Yes| D{Domain Name Match URL?}
+    D -->|Yes| E{Certificate Expired?}
+    E -->|No| F{Certificate Revoked?}
+    F -->|No| G[✅ Server Trusted]
+    B -->|No| H[❌ Reject]
+    C -->|No| H
+    D -->|No| H
+    E -->|Yes| H
+    F -->|Yes| H
+```
+
+### Certificate Chain (Trust Ladder)
+
+```mermaid
+flowchart BT
+    A[Website Certificate\nwebsite.com] -->|Signed by| B[Intermediate CA]
+    B -->|Signed by| C[Root CA\nSelf-signed]
+    C -->|Pre-installed in| D[Operating System / Browser]
+```
+
+> Root CA private key = kept offline in vault. Never touches internet.
+> Intermediate CA = online, but compromise limited scope only.
+
+### Why CA Signature Cannot Be Forged
+- CA signature = HMAC of cert data, encrypted with CA private key
+- Attacker modify cert → hash different → signature mismatch → rejected
+- Attacker forge signature → needs CA private key → mathematically impossible to brute force
+
+---
+
+## 4. Full HTTPS Handshake (TLS 1.3)
+
+```mermaid
+sequenceDiagram
+    participant C as Client (Browser)
+    participant S as Server
+
+    C->>S: ClientHello (supported ciphers, random number)
+    S->>C: ServerHello (chosen cipher, random number, Certificate)
+    C->>C: Verify Certificate (CA chain, domain, expiry)
+    C->>S: Key Exchange (encrypted with server public key)
+    S->>S: Derive Session Key
+    C->>C: Derive Session Key
+    Note over C,S: Both now have same Session Key (attacker does not)
+    C->>S: Encrypted Data (symmetric, fast)
+    S->>C: Encrypted Response (symmetric, fast)
+```
+
+---
+
+## 5. Perfect Forward Secrecy (PFS)
+
+- Old TLS: session key derived from server private key → key leak = all past messages decryptable
+- TLS 1.3 (PFS): ephemeral Diffie-Hellman key used → temporary number discarded after session
+- Attacker record today's traffic, steal key tomorrow = **still cannot decrypt old messages**
+
+---
+
+## 6. Server Verifying Client (Reverse Authentication)
+
+HTTPS only verifies server. Client must separately prove identity.
+
+```mermaid
+flowchart TD
+    A[Client Request Arrives] --> B[Check Session Token / Cookie]
+    B --> C{Token Valid + Not Expired?}
+    C -->|Yes| D[Check Nonce\nPrevent Replay Attack]
+    D --> E{Nonce Used Before?}
+    E -->|No| F[Check Timestamp\nNot Too Old?]
+    F -->|Yes| G[Check HMAC Signature\nRequest Not Tampered?]
+    G -->|Valid| H[✅ Accept Request]
+    C -->|No| I[❌ Reject]
+    E -->|Yes| I
+    F -->|No| I
+    G -->|Invalid| I
+```
+
+### Methods of Client Authentication
+
+| Method | Use Case | Strength |
+|--------|----------|----------|
+| Username + Password | Human login | Weak alone |
+| Session Token (Cookie) | Browser sessions | Medium |
+| MFA (SMS/TOTP/Hardware) | Human login | Strong |
+| SAS Token (HMAC) | Machine / IoT | Strong |
+| Mutual TLS (mTLS) | Server-to-server | Very Strong |
+| API Key + HMAC | API clients | Strong |
+
+---
+
+## 7. SAS Token vs Access Token
+
+### SAS Token (Shared Access Signature)
+- Used by: **machines / devices** (IoT, services)
+- Generated by: **client itself** using shared key + HMAC math
+- No server call needed to generate
+- Scope: specific Azure resource
+- Expiry: short (1 hour default), regenerate locally
+
+**Format:**
+```
+SharedAccessSignature sr=<resource>&sig=<HMAC_signature>&se=<expiry>&skn=<policy>
+```
+
+**Verification flow:**
+```mermaid
+sequenceDiagram
+    participant D as ESP Device
+    participant A as Azure IoT Hub
+
+    D->>D: HMAC-SHA256(resource + expiry, shared_key) = signature
+    D->>A: Request + SAS Token (over TLS)
+    A->>A: Recalculate HMAC with stored shared key
+    A->>A: Compare signature, check expiry, check nonce
+    A-->>D: Accept or Reject
+```
+
+### Access Token (OAuth2 / JWT)
+- Used by: **humans / apps acting on behalf of human**
+- Generated by: **identity server** (Azure AD, Google, Auth0) — client cannot self-generate
+- Requires internet call to identity provider
+- Comes with Refresh Token (get new access token without re-login)
+- Scope: permissions (read email, write calendar)
+
+**Flow:**
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as App
+    participant I as Identity Provider (Azure AD)
+    participant R as Resource API
+
+    U->>A: Login (username + password)
+    A->>I: Authenticate user
+    I-->>A: Access Token + Refresh Token
+    A->>R: Request + Access Token (in Authorization header)
+    R-->>A: Data
+    Note over A,I: Access Token expires → use Refresh Token to get new one
+```
+
+### Key Difference
+
+| | SAS Token | Access Token |
+|--|-----------|--------------|
+| Who uses | Machine / Device | Human / App |
+| Who generates | Client itself | Identity Server |
+| Needs internet to generate | No | Yes |
+| Has Refresh Token | No | Yes |
+| Identity tied to | Device/Service | User |
+| Standard | Azure-specific | OAuth2 / OpenID Connect |
+
+---
+
+## 8. Token Placement in Requests
+
+> ⚠️ **NEVER put tokens in URL.** URLs logged everywhere (proxy, server, browser history).
+
+| Protocol | Token Location |
+|----------|---------------|
+| HTTPS REST | `Authorization` header |
+| MQTT | `password` field in CONNECT packet |
+| AMQP | SASL token field |
+
+**Correct HTTPS example:**
+```http
+GET /devices/esp-01/messages HTTP/1.1
+Host: myhub.azure-devices.net
+Authorization: SharedAccessSignature sr=...&sig=...&se=...
+```
+
+---
+
+## 9. ESP Device ↔ Azure IoT Hub
+
+### Problem
+- ESP = limited memory, CPU, battery
+- Can't do heavy crypto repeatedly
+- No browser, no user interaction, no screen
+
+### Full Communication Flow
+
+```mermaid
+sequenceDiagram
+    participant E as ESP32 Device
+    participant D as Azure DPS
+    participant H as Azure IoT Hub
+
+    Note over E,D: First Boot / Provisioning
+    E->>D: Connect with X.509 Certificate (TLS)
+    D->>D: Verify certificate (CA chain)
+    D-->>E: Issue Shared Key + IoT Hub endpoint
+    E->>E: Store in NVS (encrypted flash)
+
+    Note over E,H: Normal Operation
+    E->>E: Read sensor data
+    E->>E: Generate SAS Token using stored shared key
+    E->>H: Publish data + SAS Token (over TLS/MQTT)
+    H->>H: Verify SAS Token (HMAC match, expiry, nonce)
+    H-->>E: Acknowledge
+```
+
+### Replay Attack Prevention on ESP Requests
+
+```mermaid
+flowchart LR
+    A[ESP Request Received] --> B{Timestamp Recent?}
+    B -->|Yes| C{Nonce Used Before?}
+    C -->|No| D{HMAC Valid?}
+    D -->|Yes| E[✅ Accept]
+    B -->|No| F[❌ Replay Detected]
+    C -->|Yes| F
+    D -->|No| G[❌ Tampered]
+```
+
+### ESP vs Browser TLS Comparison
+
+| | Browser HTTPS | ESP Device |
+|--|--------------|------------|
+| TLS | Full handshake | Lightweight TLS |
+| CA Verify | Full CA chain | CA bundle or cert fingerprint |
+| Auth | Session cookie | SAS Token / Connection String |
+| Key type | Asymmetric bootstrap → Symmetric | Same |
+| Generate token | No | Yes (self-generated SAS) |
+
+---
+
+## 10. Shared Key Distribution Problem
+
+How does shared key reach device without traveling over network?
+
+```mermaid
+flowchart TD
+    A[Shared Key Problem] --> B[Manual Flash]
+    A --> C[Azure DPS + X.509 Certificate]
+    A --> D[HSM Hardware Security Module]
+    A --> E[Secure Element e.g. ATECC608]
+
+    B --> B1[Developer copy key from portal\nFlash to device physically\nSmall scale only]
+
+    C --> C1[Factory burn X.509 cert + private key\nFirst boot → connect DPS → verify cert\nDPS issue shared key\nDevice store in encrypted NVS]
+
+    D --> D1[Key burned in chip at factory\nKey never readable by anyone\nHSM self-destructs if tampered\nAzure knows key via manufacturer agreement]
+
+    E --> E1[Dedicated secure chip on ESP32\nKey generated inside chip\nMain CPU never sees raw key\nSE handles all crypto operations]
+```
+
+### Key Insight: Asymmetric Bootstraps Symmetric
+
+```
+Factory → burn X.509 cert (asymmetric)
+         ↓
+First boot → prove identity to DPS using cert
+         ↓
+DPS issues symmetric shared key
+         ↓
+All future operations → fast symmetric key (SAS Token)
+```
+
+Same pattern as HTTPS:
+- **Asymmetric** = establish trust (expensive, once)
+- **Symmetric** = operate efficiently (cheap, always)
+
+---
+
+## 11. Attack Scenarios & Defenses
+
+| Attack | Method | Defense |
+|--------|--------|---------|
+| Eavesdrop | Read network traffic | TLS encryption (symmetric) |
+| Man-in-Middle | Intercept + re-encrypt | Certificate + CA signature |
+| Impersonation | Fake server | Certificate domain check |
+| Replay | Resend old valid request | Nonce + Timestamp |
+| Tamper | Modify request bytes | HMAC / hash integrity check |
+| Token steal | Get SAS/session token | Short expiry + HTTPS encryption |
+| Key extraction | Read device memory | HSM / Secure Element |
+| CA compromise | Steal CA private key | Offline root CA, HSM vault |
+| Typosquatting | g00gle.com fake cert | User attention (CA can't prevent) |
+
+---
+
+## 12. TLS Versions
+
+| Version | Status | Notes |
+|---------|--------|-------|
+| SSL 2.0 / 3.0 | ❌ Broken | Never use |
+| TLS 1.0 / 1.1 | ❌ Deprecated | Vulnerable |
+| TLS 1.2 | ✅ Secure | Still widely used |
+| TLS 1.3 | ✅ Best | Fewer round trips, PFS mandatory |
+
+---
+
+## 13. Mental Models (Quick Reference)
+
+| Concept | Mental Model |
+|---------|-------------|
+| CA Signature | Government stamp on passport |
+| Certificate | Passport (identity + proof combined) |
+| Symmetric Key | House key (both sides same key) |
+| Asymmetric Key | Mailbox (anyone drop letter in, only owner open) |
+| SAS Token | Temporary access badge (self-printed using secret stamp) |
+| Access Token | Security badge from reception (identity provider issues) |
+| HSM | Key locked in vault, usable but never readable |
+| DPS | Reception desk that issues badges after verifying ID |
+| PFS | Burn the key after every conversation |
+| Nonce | One-time ticket (used = invalid forever) |
