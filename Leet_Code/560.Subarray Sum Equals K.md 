@@ -1,0 +1,112 @@
+Given an array of integers nums and an integer k, return the total number of subarrays whose sum equals to k.
+
+A subarray is a contiguous non-empty sequence of elements within an array.
+
+ 
+
+Example 1:
+
+Input: nums = [1,1,1], k = 2
+Output: 2
+Example 2:
+
+Input: nums = [1,2,3], k = 3
+Output: 2
+
+```c
+# define MAP_SIZE 20011
+
+typedef struct Node{
+    int key;              // The key to be hashed
+    int value;            // The value associated with the key
+    struct Node* next;    // Pointer to next node in the chain (for collision handling)
+}Node;  
+
+Node * MAP[MAP_SIZE];
+
+void initTable(void) {
+    for (int i = 0; i < MAP_SIZE; i++) {
+        MAP[i] = NULL;  // No chains exist initially
+    }
+}
+
+int get_hash(int key )
+{
+    return (key % MAP_SIZE + MAP_SIZE) % MAP_SIZE;
+}
+
+void insert(int key, int value)
+{
+    // Step 1: Get the bucket index where this key should go
+    int key_index = get_hash(key);
+    
+    // Step 2: Start from the head of the chain at this bucket
+    Node* current = MAP[key_index];
+    
+    // Step 3: Check if key already exists in the chain
+    while(current != NULL)
+    {
+        if(current->key == key)
+        {
+            // Key found - UPDATE the existing value
+            current->value += value;
+            return;  // Exit after update
+        }
+        current = current->next;  // Move to next node in chain
+    }
+    
+    // Step 4: Key not found - INSERT a new node at the head of the chain
+    Node * new_node = malloc(sizeof(Node));
+    new_node->value = value;
+    new_node->key = key;
+    new_node->next = MAP[key_index];  // Point new node to current head
+    MAP[key_index] = new_node;        // Make new node the new head
+    
+    return;
+}
+
+int* search(int key)
+{
+    // Step 1: Get the bucket index where this key should be
+    int key_index = get_hash(key);
+    
+    // Step 2: Start from the head of the chain at this bucket
+    Node * current = MAP[key_index];
+    
+    // Step 3: Traverse the chain looking for the key
+    while(current != NULL)
+    {
+        if(current->key == key)
+        {
+            // Key found - return pointer to its value
+            return &current->value;
+        }
+        current = current->next;  // Move to next node in chain
+    }
+    
+    // Step 4: Key not found in the chain
+    return NULL;
+}
+
+int subarraySum(int* arr, int n, int k) 
+{
+    initTable();
+    int res=0;
+    int sum=0 ;
+    int i=0;
+
+    while (i< n)
+    {
+        sum +=arr[i];
+        if(sum == k) res++;
+        int * search_index= search(sum-k);
+        if(search_index!=NULL)
+        {
+            res+=*search_index;
+        }
+        insert(sum,1);
+        i++;
+    }
+    return res;
+}
+```
