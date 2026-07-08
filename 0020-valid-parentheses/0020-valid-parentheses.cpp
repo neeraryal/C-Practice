@@ -5,13 +5,13 @@ public:
         unordered_map<char,char> mapp= {{'}','{'},{']','['},{')','('}};
         stack<char>st;
 
-        for(int i=0 ; i< s.size();i++)
+        for(auto &c : s)
         {
-            if(s[i]=='(' || s[i] == '{' || s[i] == '[')  
-                st.push(s[i]);
+            if(c=='(' || c == '{' || c == '[')  
+                st.push(c);
             else
             {
-                if(st.empty() || st.top() != mapp[s[i]]) return false;
+                if(st.empty() || st.top() != mapp[c]) return false;
                 st.pop();
             }
         }
@@ -65,5 +65,24 @@ public:
         if(!st.empty()) return false;
 
         return true;
+    }
+
+
+    bool isValid(string s) 
+    {
+        unordered_map<char,char> mapp= {{'}','{'},{']','['},{')','('}};
+        stack<char>st;
+
+        for(int i=0 ; i< s.size();i++)
+        {
+            if(s[i]=='(' || s[i] == '{' || s[i] == '[')  
+                st.push(s[i]);
+            else
+            {
+                if(st.empty() || st.top() != mapp[s[i]]) return false;
+                st.pop();
+            }
+        }
+        return st.empty();
     }
 */
