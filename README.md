@@ -20,12 +20,14 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 | ------- |
 | [0020-valid-parentheses](https://github.com/neeraryal/C-Practice/tree/master/0020-valid-parentheses) |
 | [0125-valid-palindrome](https://github.com/neeraryal/C-Practice/tree/master/0125-valid-palindrome) |
+| [0151-reverse-words-in-a-string](https://github.com/neeraryal/C-Practice/tree/master/0151-reverse-words-in-a-string) |
 | [0242-valid-anagram](https://github.com/neeraryal/C-Practice/tree/master/0242-valid-anagram) |
 | [1021-remove-outermost-parentheses](https://github.com/neeraryal/C-Practice/tree/master/1021-remove-outermost-parentheses) |
 ## Two Pointers
 |  |
 | ------- |
 | [0125-valid-palindrome](https://github.com/neeraryal/C-Practice/tree/master/0125-valid-palindrome) |
+| [0151-reverse-words-in-a-string](https://github.com/neeraryal/C-Practice/tree/master/0151-reverse-words-in-a-string) |
 ## Stack
 |  |
 | ------- |
