@@ -3,20 +3,21 @@ public:
     string frequencySort(string s) 
     {
         unordered_map<char,int> freq;
+        //Store frequency of each character 
         for (auto ch : s) freq[ch]++;
+        //Create a bucket vector of vector of char , and fill it with map data.
 
-        vector<pair<char,int>> freq_arr;
-        for( auto [ch, fq] : freq) freq_arr.push_back({ch,fq});
-
-        auto cmp = [&](pair <char,int>&a, pair<char,int>&b)
-        {
-            return a.second > b.second;
-        };
-
-        sort(freq_arr.begin(),freq_arr.end(),cmp);
+        vector<vector <char>> bucket(s.size()+1);
+        for( auto [ch, fr]: freq) bucket[fr].push_back(ch);
 
         string res;
-        for (auto [ch , fq] : freq_arr) res.append(fq,ch);
+        for (int i = bucket.size()-1; i>=1; i-- )
+        {
+            for(auto ch : bucket[i])
+            {
+                res.append(i,ch);
+            }
+        }
 
         return res;
 
@@ -27,6 +28,7 @@ public:
 
 
 /*
+    Approach 1 ::
     string frequencySort(string s) 
     {
         vector<int>freq(128);
@@ -43,6 +45,32 @@ public:
         // Revserse sort string on the basis of frequency
         sort(s.begin(),s.end(), cmp);
         return s;
+
+    }
+
+    Approach 2::
+
+    string frequencySort(string s) 
+    {
+        unordered_map<char,int> freq;
+        //Store frequency of each character 
+        for (auto ch : s) freq[ch]++;
+        //Create a vector of pairs, and fill it with map data.
+        vector<pair<char,int>> freq_arr;
+        for( auto [ch, fq] : freq) freq_arr.push_back({ch,fq});
+
+        auto cmp = [&](pair <char,int>&a, pair<char,int>&b)
+        {
+            return a.second > b.second;
+        };
+        //Sort the vector on the basis of frequency instead of char 
+        sort(freq_arr.begin(),freq_arr.end(),cmp);
+        //Append the charcter times frequency in the res.
+        string res;
+        for (auto [ch , fq] : freq_arr) res.append(fq,ch);
+
+        return res;
+
 
     }
 */
