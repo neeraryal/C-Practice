@@ -4,10 +4,12 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 ## Array
 |  |
 | ------- |
+| [0049-group-anagrams](https://github.com/neeraryal/C-Practice/tree/master/0049-group-anagrams) |
 | [0217-contains-duplicate](https://github.com/neeraryal/C-Practice/tree/master/0217-contains-duplicate) |
 ## Hash Table
 |  |
 | ------- |
+| [0049-group-anagrams](https://github.com/neeraryal/C-Practice/tree/master/0049-group-anagrams) |
 | [0205-isomorphic-strings](https://github.com/neeraryal/C-Practice/tree/master/0205-isomorphic-strings) |
 | [0217-contains-duplicate](https://github.com/neeraryal/C-Practice/tree/master/0217-contains-duplicate) |
 | [0242-valid-anagram](https://github.com/neeraryal/C-Practice/tree/master/0242-valid-anagram) |
@@ -15,6 +17,7 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 ## Sorting
 |  |
 | ------- |
+| [0049-group-anagrams](https://github.com/neeraryal/C-Practice/tree/master/0049-group-anagrams) |
 | [0217-contains-duplicate](https://github.com/neeraryal/C-Practice/tree/master/0217-contains-duplicate) |
 | [0242-valid-anagram](https://github.com/neeraryal/C-Practice/tree/master/0242-valid-anagram) |
 | [0451-sort-characters-by-frequency](https://github.com/neeraryal/C-Practice/tree/master/0451-sort-characters-by-frequency) |
@@ -23,6 +26,7 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 | ------- |
 | [0005-longest-palindromic-substring](https://github.com/neeraryal/C-Practice/tree/master/0005-longest-palindromic-substring) |
 | [0020-valid-parentheses](https://github.com/neeraryal/C-Practice/tree/master/0020-valid-parentheses) |
+| [0049-group-anagrams](https://github.com/neeraryal/C-Practice/tree/master/0049-group-anagrams) |
 | [0125-valid-palindrome](https://github.com/neeraryal/C-Practice/tree/master/0125-valid-palindrome) |
 | [0151-reverse-words-in-a-string](https://github.com/neeraryal/C-Practice/tree/master/0151-reverse-words-in-a-string) |
 | [0205-isomorphic-strings](https://github.com/neeraryal/C-Practice/tree/master/0205-isomorphic-strings) |
