@@ -6,6 +6,7 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 | ------- |
 | [0049-group-anagrams](https://github.com/neeraryal/C-Practice/tree/master/0049-group-anagrams) |
 | [0217-contains-duplicate](https://github.com/neeraryal/C-Practice/tree/master/0217-contains-duplicate) |
+| [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
 ## Hash Table
 |  |
 | ------- |
@@ -13,6 +14,7 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 | [0205-isomorphic-strings](https://github.com/neeraryal/C-Practice/tree/master/0205-isomorphic-strings) |
 | [0217-contains-duplicate](https://github.com/neeraryal/C-Practice/tree/master/0217-contains-duplicate) |
 | [0242-valid-anagram](https://github.com/neeraryal/C-Practice/tree/master/0242-valid-anagram) |
+| [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
 | [0451-sort-characters-by-frequency](https://github.com/neeraryal/C-Practice/tree/master/0451-sort-characters-by-frequency) |
 ## Sorting
 |  |
@@ -20,6 +22,7 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 | [0049-group-anagrams](https://github.com/neeraryal/C-Practice/tree/master/0049-group-anagrams) |
 | [0217-contains-duplicate](https://github.com/neeraryal/C-Practice/tree/master/0217-contains-duplicate) |
 | [0242-valid-anagram](https://github.com/neeraryal/C-Practice/tree/master/0242-valid-anagram) |
+| [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
 | [0451-sort-characters-by-frequency](https://github.com/neeraryal/C-Practice/tree/master/0451-sort-characters-by-frequency) |
 ## String
 |  |
@@ -63,17 +66,28 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 ## Heap (Priority Queue)
 |  |
 | ------- |
+| [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
 | [0451-sort-characters-by-frequency](https://github.com/neeraryal/C-Practice/tree/master/0451-sort-characters-by-frequency) |
 ## Bucket Sort
 |  |
 | ------- |
+| [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
 | [0451-sort-characters-by-frequency](https://github.com/neeraryal/C-Practice/tree/master/0451-sort-characters-by-frequency) |
 ## Counting
 |  |
 | ------- |
+| [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
 | [0451-sort-characters-by-frequency](https://github.com/neeraryal/C-Practice/tree/master/0451-sort-characters-by-frequency) |
 ## Dynamic Programming
 |  |
 | ------- |
 | [0005-longest-palindromic-substring](https://github.com/neeraryal/C-Practice/tree/master/0005-longest-palindromic-substring) |
+## Divide and Conquer
+|  |
+| ------- |
+| [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
+## Quickselect
+|  |
+| ------- |
+| [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
 <!---LeetCode Topics End-->
