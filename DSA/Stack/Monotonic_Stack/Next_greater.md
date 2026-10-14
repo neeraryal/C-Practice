@@ -1,3 +1,40 @@
+# Next Greater Element
+> Har element ke right mein pehla bada element do, na ho to `-1`
+
+| Pattern | Data structure | Time | Space |
+|---|---|---|---|
+| [Monotonic Stack – decreasing stack of indices](monotonic_stack.md) | Linked-list stack (indices store), `ans` array | O(n) | O(n) |
+
+**How it works**
+- **Soch:** Brute force mein har element ke liye right scan → O(n²). Ulta socho: jin elements ko abhi tak apna "next greater" nahi mila, unke indices stack mein wait karte hain. Koi bada element aaye to wahi un sabka answer hai.
+- **Pop & answer:** Jab tak `arr[i] > arr[peek()]` → `pop` karo aur `ans[top_val] = arr[i]`.
+- **Push:** Phir `push(i)` — ab `i` apne next greater ka wait karega.
+- **Leftover:** Loop ke baad stack mein bache indices ke right mein koi bada nahi → `-1`.
+- **Kyun sahi hai:** Stack (bottom → top) values decreasing (equal allowed) rehti hain, to `arr[i]` top se bada hai to wahi top ka pehla bada element hai (beech wale sab chhote the, pehle hi pop ho gaye). Har index ek baar push, ek baar pop → O(n).
+- **Dry run:** `[2,1,2,4,3]` (stack values mein dikhaya, asal mein indices)
+  - `2`, `1` push → stack `[2,1]`
+  - `2`: `1` pop → ans[1]=2; push → `[2,2]`
+  - `4`: dono `2` pop → ans[2]=4, ans[0]=4; push `4`, phir `3` push
+  - leftover `4,3` → `-1` → `[4,2,4,-1,-1]` ✔
+
+**Gotcha:** `>` strict hai → equal value "greater" nahi gini jaati (`[4,4]` → `[-1,-1]`). `top !=NULL` check `&&` mein pehle aata hai, isliye empty stack pe `peek()` ka `-1` kabhi `arr[-1]` nahi banta.
+**vs related:** Folder mein akela problem — variants: next smaller ke liye `>` ko `<` karo, previous greater ke liye right se left scan.
+
+<details><summary>Problem statement</summary>
+
+Given an array arr[] of n integers, find the next greater element for every element. The next greater element of arr[i] is the first element to its right that is strictly greater than arr[i]. If no such element exists, the answer for that position is -1.
+
+Example:
+
+Input: arr[] = [2, 1, 2, 4, 3]
+Output: [4, 2, 4, -1, -1]
+Explanation: 2 → 4, 1 → 2, 2 → 4 (first greater element to the right); 4 and 3 have no greater element to their right → -1.
+
+</details>
+
+## Code
+
+```c
 /*
  * NEXT GREATER ELEMENT FINDER
  * 
@@ -126,7 +163,7 @@ int main()
     for(int i=0 ; i<n ;i++)
     {
         // While stack is not empty and current element is greater than element at index stored at top
-        while(top !=NULL  && arr[i]> arr[peek()])
+        while(top !=NULL  && arr[i]> arr[peek()])  // top!=NULL pehle → empty pe peek nahi; strict > → equal pop nahi
         {
             int top_val=pop();     // Pop the index from stack
             ans[top_val]=arr[i];   // Current element is the next greater for popped index
@@ -154,3 +191,4 @@ int main()
     
     return 0; 
 }
+```
