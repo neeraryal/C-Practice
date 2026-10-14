@@ -56,3 +56,51 @@ int* searchRange(int* arr, int n, int target, int* returnSize)
 
     return res_ret;
 }
+
+/* 
+/**
+ * Note: The returned array must be malloced,
+ * assume caller calls free().
+
+int binarySearch(int* arr, int n, int target, int findFirst)
+{
+    int left = 0, right = n - 1;
+    int res = -1;
+
+    while (left <= right)
+    {
+        int mid = left + (right - left) / 2;
+
+        if (arr[mid] == target)
+        {
+            res = mid;
+
+            if (findFirst)
+                right = mid - 1;
+            else
+                left = mid + 1;
+        }
+        else if (arr[mid] > target)
+        {
+            right = mid - 1;
+        }
+        else
+        {
+            left = mid + 1;
+        }
+    }
+
+    return res;
+}
+
+int* searchRange(int* arr, int n, int target, int* returnSize)
+{
+    int* res = malloc(sizeof(int) * 2);
+    *returnSize = 2;
+
+    res[0] = binarySearch(arr, n, target, 1);
+    res[1] = binarySearch(arr, n, target, 0);
+
+    return res;
+}
+*/
