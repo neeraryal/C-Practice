@@ -8,6 +8,7 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 | [0049-group-anagrams](https://github.com/neeraryal/C-Practice/tree/master/0049-group-anagrams) |
 | [0128-longest-consecutive-sequence](https://github.com/neeraryal/C-Practice/tree/master/0128-longest-consecutive-sequence) |
 | [0217-contains-duplicate](https://github.com/neeraryal/C-Practice/tree/master/0217-contains-duplicate) |
+| [0260-single-number-iii](https://github.com/neeraryal/C-Practice/tree/master/0260-single-number-iii) |
 | [0287-find-the-duplicate-number](https://github.com/neeraryal/C-Practice/tree/master/0287-find-the-duplicate-number) |
 | [0347-top-k-frequent-elements](https://github.com/neeraryal/C-Practice/tree/master/0347-top-k-frequent-elements) |
 ## Hash Table
@@ -150,6 +151,7 @@ A collection of LeetCode questions to ace the coding interview! - Created using 
 ## Bit Manipulation
 |  |
 | ------- |
+| [0260-single-number-iii](https://github.com/neeraryal/C-Practice/tree/master/0260-single-number-iii) |
 | [0287-find-the-duplicate-number](https://github.com/neeraryal/C-Practice/tree/master/0287-find-the-duplicate-number) |
 ## Pigeonhole Principle
 |  |
