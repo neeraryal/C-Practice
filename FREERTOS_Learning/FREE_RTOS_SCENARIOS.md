@@ -728,3 +728,292 @@ static void app(void *arg) {
 **Pass 4:** ESP32 target specifics: stack depth bytes, pinned tasks, SMP critical sections, ISR priority and IDF config. Cross-check installed IDF version before compiling.
 
 *Not all snippets compile standalone: hardware handlers (`process_one_irq`, `uart_write_frame`, etc.), system initialization, GPIO ISR registration and driver hooks are project-specific placeholders. All key RTOS calls have their parameters described in the [API guide](./FREE_RTOS_API.md).*
+
+---
+
+## Advanced scenario practice — Q41 to Q70
+
+Yeh **additional interview counter-questions** hain. Pehle khud solve karo: payload vs signal, wait/timeout, task priority, ISR restrictions aur failure policy. API arguments aur commented C code: [API Hinglish notes](./FREE_RTOS_API.md).
+
+### Q41. Queue full aur high-priority producer busy retry kare?
+
+**Situation aur best approach:** xQueueSend(...,0) immediately fail; busy producer consumer ko CPU nahi de sakta. Bounded timeout/drop/backpressure use karo.
+
+**Counter-question:** Producer xQueueSend(...,50 ticks) kare aur consumer 10 ticks mein read kare to state transition kya?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q42. Queue mein local struct ka pointer send ho?
+
+**Situation aur best approach:** Queue pointer ki COPY karti hai, struct ki nahi; function return ke baad dangling. Queue struct by value ya owned static memory-pool pointer use karo.
+
+**Counter-question:** xQueueSend pdPASS hone ke baad bhi consumer corrupted data kyun dekh sakta hai?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q43. Two tasks shared counter++ use karein?
+
+**Situation aur best approach:** Counter++ read-modify-write race; suitable atomics ya short SMP-safe critical section use karo; longer work ke liye mutex.
+
+**Counter-question:** volatile int se race solve ho jayegi?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q44. Suspend / resume se event signal karein?
+
+**Situation aur best approach:** xTaskResume before vTaskSuspend ho jaaye to wake lost; notification/semaphore pending event ke liye safer.
+
+**Counter-question:** Event pehle aa gaya, waiting task baad mein enter kare—kaun si primitive pending event retain karti?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q45. xQueueReceive timeout ke baad old value process ho?
+
+**Situation aur best approach:** Only successful pdPASS par output buffer ka naya data valid maano; pdFAIL on timeout par stale variable reh sakta.
+
+**Counter-question:** Timeout pe last valid value use karni ho to freshness kaise record karoge?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q46. GPIO ISR queue full paaye?
+
+**Situation aur best approach:** xQueueSendFromISR nonblocking fail karega. Count drops and choose ring buffer/DMA, depth or throughput improvement.
+
+**Counter-question:** Can ISR wait 20ms for queue space?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q47. UART DMA transaction mutex release ke baad bhi chal rahi?
+
+**Situation aur best approach:** Mutex only start tak rakhna unsafe ho sakta hai; complete transaction, buffer lifetime aur DMA-done ownership protocol design karo.
+
+**Counter-question:** What if TX input pointer stack pe tha?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q48. 1ms periodic loop with 100Hz tick?
+
+**Situation aur best approach:** 100Hz tick = 10ms; 1ms pdMS_TO_TICKS often zero. Hardware timer/peripheral or redesigned tick configuration use karo.
+
+**Counter-question:** vTaskDelay(1) kitne milliseconds hai?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q49. 16-bit tick wraps around?
+
+**Situation aur best approach:** TickType_t unsigned delta approach carefully choose, long absolute comparison naive na rakho; overflow-aware kernel helpers.
+
+**Counter-question:** 100Hz pe 16-bit counter kab wrap hota? ~655.36 seconds.
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q50. Multiple producer message buffer share karein?
+
+**Situation aur best approach:** Message buffer normally one writer/one reader assumption; serialize writers with mutex or use shared typed queue/pool.
+
+**Counter-question:** Multiple writes without synchronization kab corrupt protocol?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q51. Event group bit repeated interrupts count kare?
+
+**Situation aur best approach:** Event group sets only bits; repeated same event coalesces. Counting notification/semaphore or event queue use karo.
+
+**Counter-question:** Three times set bit = count 3?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q52. Software timer callback blocks I2C for 2 seconds?
+
+**Situation aur best approach:** Shared timer service task block hoti hai, baaki timer callbacks slip. Worker task ko queue/notify bhejo.
+
+**Counter-question:** Timer priority increase karne se blocking callback ka issue fix hoga?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q53. ESP32 two cores both increment shared variable?
+
+**Situation aur best approach:** Local interrupt disable on one core enough nahi. SMP-safe spinlock/atomic/mutex based on context use karo.
+
+**Counter-question:** Pinned-to-core task hone se shared data automatically safe hai?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q54. Resource deadlock with two mutexes?
+
+**Situation aur best approach:** Task A takes X then Y, B takes Y then X -> circular wait. Always consistent lock order, bounded waits.
+
+**Counter-question:** Priority inheritance deadlock solve karta hai?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q55. Binary semaphore multiple tasks ko broadcast kare?
+
+**Situation aur best approach:** One Give one token/waiter unblock karta hai, broadcast nahi. Event group persistent flag / multiple notifications use karo.
+
+**Counter-question:** One Give pe three waiters simultaneously wake honge?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q56. Counting semaphore maximum pe aur give?
+
+**Situation aur best approach:** Maximum count pe xSemaphoreGive fails; unlimited lossless event storage nahi. Overflow counter or rate/capacity control.
+
+**Counter-question:** Does binary vs counting change payload support?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q57. Queue length grow karke overload solve kare?
+
+**Situation aur best approach:** Long-term producer rate > consumer rate to any finite queue eventually full. Throughput, batching, backpressure, drops/parallel consumer address karo.
+
+**Counter-question:** 10ms produce, 100ms consume: queue 100 se indefinite fix?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q58. Heap enough free but allocation fails?
+
+**Situation aur best approach:** Fragmentation: enough total bytes but no sufficiently large contiguous region. Heap scheme, largest block, leak and fixed pools inspect karo.
+
+**Counter-question:** xPortGetFreeHeapSize se requested large alloc guaranteed?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q59. Deleted task ka handle dusra task use kare?
+
+**Situation aur best approach:** Stale handle can be invalid. Graceful stop protocol and ownership synchronization; application buffers/mutex not auto-cleaned.
+
+**Counter-question:** vTaskDelete(NULL) se caller-owned heap free hoti?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q60. Watchdog heartbeat increment while task is stuck?
+
+**Situation aur best approach:** Liveness heartbeat ko meaningful progress/deadlines se tie karo. Supervisor only when all workers completed useful work.
+
+**Counter-question:** Busy-loop task heartbeat badhaye, kya healthy hai?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q61. High-priority ISR cannot call FreeRTOS?
+
+**Situation aur best approach:** Port-specific interrupt priority/level rules; forbidden ISR mein FromISR bhi invalid. Do minimal hardware work, defer to allowed ISR/task.
+
+**Counter-question:** portYIELD_FROM_ISR invalid priority fix karta?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q62. Task blocked on event and scheduler suspended?
+
+**Situation aur best approach:** vTaskSuspendAll scheduler ko suspend karta, interrupts necessarily disabled nahi; suspended period mein blocking calls mat karo.
+
+**Counter-question:** Is it safe to xQueueReceive(...,portMAX_DELAY) while scheduler suspended?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q63. Notification overwrite loses older data?
+
+**Situation aur best approach:** eSetValueWithOverwrite latest 32-bit value keeps; previous data replace. For every payload queue better; eSetValueWithoutOverwrite can fail pending.
+
+**Counter-question:** Counter notification se payload history milegi?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q64. Sensor has 3 ready conditions, one goes offline?
+
+**Situation aur best approach:** Event group status bits use karo; disconnect pe clear; xEventGroupWaitBits AND as needed. Avoid stale sticky ready flag.
+
+**Counter-question:** xClearOnExit pdTRUE hona chahiye if readiness is ongoing level?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q65. Two equal-priority CPU-bound tasks unevenly run?
+
+**Situation aur best approach:** Check time slicing, affinity, kernel config and task Ready state; yield equal-priority peers, best block on events.
+
+**Counter-question:** taskYIELD se lower-priority task ko chance milta?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q66. Logging adds latency to control task?
+
+**Situation aur best approach:** printf can lock/block/UART slow; bounded deferred logging queue or trace/hardware timestamps.
+
+**Counter-question:** ISR ke andar printf real-time safe assume kar sakte?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q67. Output buffer too small for next message?
+
+**Situation aur best approach:** MessageBufferReceive may return 0 and leave too-large message pending; pre-size buffer according to protocol maximum.
+
+**Counter-question:** Stream buffer and message buffer framing ka difference?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q68. Task priority inversion with medium task?
+
+**Situation aur best approach:** Mutex priority inheritance boosts low owner when high waiter blocks; keep critical section short. Binary semaphore lacks inheritance.
+
+**Counter-question:** Does inheritance solve nested mutex/deadlock?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q69. Queue holds pointer to freed heap buffer?
+
+**Situation aur best approach:** Sender and receiver must agree ownership transfer; consumer uses pointer only while buffer valid. Pool/free queue or value copies.
+
+**Counter-question:** Queue pointer ko deep copy karti hai?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+### Q70. Multiple readiness signals with AND vs OR?
+
+**Situation aur best approach:** xEventGroupWaitBits fourth arg pdTRUE AND; pdFALSE OR; third arg clear-on-exit controls flag lifetime.
+
+**Counter-question:** First flag set, second set after 5s; waiter kab READY?
+
+**Alternative choose karte waqt:** Actual payload ho to queue/buffer, sirf single-task event ho to notification; shared resource owner ho to mutex; ISR ho to FromISR + correct interrupt priority. Timeout/overflow bhi answer mein discuss karo.
+
+
+
+## Two new code-tracing exercises
+
+### Queue full with zero timeout
+
+```c
+QueueHandle_t q = xQueueCreate(2, sizeof(int)); // Do int ki capacity
+int a=10, b=20, c=30, out=0;
+xQueueSend(q, &a, 0);                           // 1 item; no blocking
+xQueueSend(q, &b, 0);                           // 2 items; queue full
+BaseType_t result = xQueueSend(q, &c, 0);       // pdFAIL immediately; NOT Blocked
+if (result != pdPASS) {
+    // 'c' drop/retry ka explicit decision lo, silently ignore mat karo
+}
+xQueueReceive(q, &out, 0);                      // 'a' dequeue; ab ek slot free
+```
+
+**Interviewer:** Agar third parameter 50 ticks ho aur consumer 10 ticks baad dequeue kare? Sender full queue pe Blocked jaata, space available hote hi Ready hota, scheduling permit kare to send success hota. 50 *ticks* hai, milliseconds nahi.
+
+### ISR notification counting
+
+```c
+// Worker task context:
+for (;;) {
+    uint32_t previousCount = ulTaskNotifyTake(pdFALSE, portMAX_DELAY);
+    // Count zero tha to wait mein Blocked; pdFALSE one count consume karta hai
+    // Return value purani pending count hai; yahan one event process karo
+    process_one_event();
+}
+
+// ISR context (sirf FreeRTOS-compatible interrupt level par):
+BaseType_t hpw = pdFALSE;                   // Pehle flag false
+vTaskNotifyGiveFromISR(workerHandle, &hpw); // Event pending count increment
+portYIELD_FROM_ISR(hpw);                    // ISR ke end par scheduling request
+```
+
+**Interviewer:** pdTRUE use karte to? Pending event count zero ho jaata, burst event occurrences coalesce ho sakti hain. Bounded counters bhi overflow kar sakte hain.
+
+---
+
+*Q41–Q70 interview-focused extension; examples illustrative hain, hardware hooks and ISR registration target-specific honge.*
