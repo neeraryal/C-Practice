@@ -1,1934 +1,926 @@
-# FreeRTOS API Reference — Complete Guide
+# FreeRTOS API Notes — Hinglish Interview Edition
 
-> Complete topic-wise API reference with parameters, purpose, use cases, examples, and alternatives.
-> Covers the classic single-core (Cortex-M / ESP32) FreeRTOS kernel plus ESP-IDF and SMP notes where relevant.
+> **Goal:** Ratna nahi, samajhna: **problem → task state → right primitive → API parameters → code → failure case → counter-question**.
+> Companion: [40 scenario-based questions](./FREE_RTOS_SCENARIOS.md).
+> Examples assume standard FreeRTOS C headers; **ESP-IDF 5.x / ESP32 differences** specially marked. Real project mein `FreeRTOSConfig.h` aur port docs check karo.
 
----
-
-## Table of Contents
-
-0. [Core Concepts & Foundations](#0-core-concepts--foundations)
-1. [Task Management](#1-task-management)
-2. [Scheduler Control](#1b-scheduler-control)
-3. [Queue](#2-queue)
-4. [Queue Sets](#2b-queue-sets)
-5. [Semaphore — Binary](#3-semaphore--binary)
-6. [Semaphore — Counting](#4-semaphore--counting)
-7. [Mutex](#5-mutex)
-8. [Mailbox](#6-mailbox)
-9. [Task Notifications](#7-task-notifications)
-10. [Event Groups / Event Bits](#8-event-groups--event-bits)
-11. [Software Timers](#9-software-timers)
-12. [Stream Buffer](#10-stream-buffer)
-13. [Message Buffer](#11-message-buffer)
-14. [Memory Management](#12-memory-management)
-15. [Critical Sections and Interrupt Control](#13-critical-sections-and-interrupt-control)
-16. [Hook Functions (Callbacks)](#13b-hook-functions-callbacks)
-17. [FreeRTOSConfig.h Reference](#13c-freertosconfigh-reference)
-18. [Interview Topics to Know Cold](#14-interview-topics-to-know-cold)
-19. [Study Notes](#15-study-notes)
-20. [Appendix A — Data Types](#appendix-a--data-types)
-21. [Appendix B — Return Codes](#appendix-b--return-codes)
-22. [Appendix C — Common Bugs & Gotchas](#appendix-c--common-bugs--gotchas)
+## Reading order (60-second map)
+1. [Foundations, ticks, scheduler](#1-foundations-ticks--scheduler)
+2. [Task creation and life-cycle](#2-task-creation--life-cycle)
+3. [Blocking and periodic timing](#3-blocking--periodic-timing)
+4. [Queues / producer-consumer](#4-queues--producer-consumer)
+5. [Binary & counting semaphores](#5-binary--counting-semaphores)
+6. [Mutex, recursive mutex, priority inversion](#6-mutex--recursive-mutex--priority-inversion)
+7. [Direct task notifications](#7-direct-task-notifications)
+8. [Event groups](#8-event-groups)
+9. [Software timers](#9-software-timers)
+10. [Stream/message buffers, mailbox, queue sets](#10-stream-message-buffers-mailbox--queue-sets)
+11. [ISR & context switches](#11-isr--context-switches)
+12. [Memory, stack, debugging, configuration](#12-memory-stack-debugging--configuration)
+13. [Decision matrix, common mistakes](#13-quick-decision-matrix)
+14. [Rapid interview & counter-questions](#14-rapid-fire-interview--counter-questions)
+15. [Further reading](#15-official-references)
 
 ---
 
-## 0. Core Concepts & Foundations
+## 1. Foundations, ticks & scheduler
 
-Read this once — every API below assumes these ideas.
+**FreeRTOS kya karta hai?** Kernel tasks ko schedule karta hai, unke beech data pass/synchronize karata hai, timers aur memory utilities provide karta hai. Task = independent function + stack + TCB. Standard FreeRTOS embedded kernel *by itself* file system ya TCP/IP stack nahi hota.
 
-### What FreeRTOS is
-A **real-time kernel** (not a full OS): a scheduler, plus inter-task communication and
-synchronization primitives. No file system, no networking, no drivers in the core — those
-are add-ons (FreeRTOS+TCP, FAT, ESP-IDF components, etc.).
+**Scheduler ka simple rule (single-core preemptive):** Highest-priority **Ready** task CPU lega. High-priority task agar block nahi hota aur continuously run karta rahe to lower-priority task starve ho sakta hai. Equal priority tasks time-slicing se CPU share kar sakte hain jab `configUSE_TIME_SLICING` enabled ho. **ESP32 SMP mein multi-core scheduling/affinity ke additional rules hain.**
 
-### The Scheduler
-- **Preemptive, priority-based** by default. The **highest-priority task that is Ready runs**.
-- Equal-priority Ready tasks share the CPU via **time-slicing** (round-robin) when
-  `configUSE_TIME_SLICING = 1`.
-- A **tick interrupt** (default 1000 Hz → `configTICK_RATE_HZ`) drives time-slicing and delays.
-- Preemption means a higher-priority task becoming Ready **immediately** interrupts a
-  lower-priority running task — you rarely need to call `taskYIELD()` manually.
+### Task state ko story ki tarah samjho
 
-### Task States (know the diagram cold)
-
-```
-                 vTaskResume() / event
-        ┌──────────────────────────────────────┐
-        │                                       │
-   ┌─────────┐   scheduler picks it      ┌──────────┐
-   │ READY   │ ────────────────────────► │ RUNNING  │
-   │         │ ◄──────────────────────── │          │
-   └─────────┘   preempted / yields      └──────────┘
-        ▲                                    │  │
-        │ delay expires /                    │  │ vTaskDelay(), block on
-        │ event occurs                       │  │ queue/sem/notify (with timeout)
-        │                                    │  ▼
-   ┌──────────┐                         ┌──────────┐
-   │ BLOCKED  │ ◄────────────────────── │          │
-   └──────────┘                         └──────────┘
-        │  vTaskSuspend()                    │ vTaskSuspend()
-        ▼                                    ▼
-   ┌──────────────────────  SUSPENDED  ──────────────────────┐
-   └─────────────────────────────────────────────────────────┘
-```
-
-- **Running** — currently executing (only one per core).
-- **Ready** — able to run, waiting for the CPU (a higher/equal task has it).
-- **Blocked** — waiting for a timeout or an event (queue item, semaphore, notification).
-  Consumes no CPU. A blocked task always has a timeout (may be `portMAX_DELAY` = forever).
-- **Suspended** — removed from scheduling by `vTaskSuspend()`; only `vTaskResume()` returns it.
-
-### The Idle Task
-- Created automatically when the scheduler starts, at priority **0** (`tskIDLE_PRIORITY`).
-- Responsibilities: frees memory of tasks deleted with `vTaskDelete()`, runs the **idle hook**,
-  and (if enabled) performs **tickless idle** for low power.
-- **Never let the idle task starve** — give every other task a `vTaskDelay`/blocking point,
-  or deleted-task memory is never reclaimed.
-
-### Naming Conventions (decode any API at a glance)
-| Prefix | Meaning | Example |
+| State | Meaning | Typical transition |
 |---|---|---|
-| `x` | returns/holds a `BaseType_t` or handle type | `xQueueSend`, `xTaskCreate` |
-| `v` | returns `void` | `vTaskDelay` |
-| `ul` | unsigned long (32-bit) | `ulTaskNotifyTake` |
-| `ux` | unsigned base type | `uxQueueMessagesWaiting` |
-| `pv` | pointer to void | `pvParameters` |
-| `pc` | pointer to char | `pcName` |
-| `px` | pointer to a struct/BaseType | `pxCreatedTask` |
-| `pd*` | `#define` constant | `pdTRUE`, `pdMS_TO_TICKS` |
-| `...FromISR` | interrupt-safe variant — never blocks | `xQueueSendFromISR` |
+| Running | Abhi CPU pe execute ho raha hai | preemption / yield / blocking call |
+| Ready | CPU ke liye eligible, turn ka wait | scheduler selects |
+| Blocked | Time/event ka wait; **CPU waste nahi hota** | delay expires / queue item / semaphore / timeout |
+| Suspended | Explicitly suspend kiya; normal timeout se automatically ready nahi | `vTaskResume` / `xTaskResumeFromISR` |
+| Deleted | Task finish; kernel cleanup may be deferred | `vTaskDelete` |
 
-### Ticks and Time
+**Important:** `xQueueSend(q, &v, 0)` fail hone se task **automatically Blocked nahi hota**. Zero wait means immediately return. `vTaskDelay()` ke andar jaate hi specified tick delay (nonzero) ke liye task Blocked hota hai. High-priority busy-loop CPU occupy karega, even if queue full.
+
+### Tick frequency, interval, tick count — alag concepts
+
+- `configTICK_RATE_HZ = 100` → **100 ticks/second**, tick interval **10 ms**.
+- `configTICK_RATE_HZ = 1000` → **1000 ticks/second**, tick interval **1 ms**.
+- `xTaskGetTickCount()` → scheduler ke tick counter ka current value; **milliseconds nahi**.
+- `pdMS_TO_TICKS(500)` → 500 ms ko configured ticks mein convert karta hai; 100 Hz pe 50 ticks.
+- `portTICK_PERIOD_MS` = tick interval in milliseconds (integer macro; sub-1-ms tick / some ports pe unsuitable ho sakta hai).
+- Tick-based delay *minimum exact execution time guarantee* nahi: interrupts, priorities, scheduling aur conversion round-off matter karte hain.
+- Tickless idle mein suppressed periodic tick interrupts ke bawajood kernel elapsed ticks account karta hai.
+
 ```c
-TickType_t ticks = pdMS_TO_TICKS(250);   // convert ms → ticks (always use this macro)
-// portTICK_PERIOD_MS = ms per tick (e.g. 1 at 1000 Hz)
-// portMAX_DELAY = block forever (only truly "forever" if configUSE_TIMERS/INCLUDE_vTaskSuspend=1)
+// Example: assume configTICK_RATE_HZ = 100 (one tick = 10 ms)
+TickType_t now = xTaskGetTickCount();  // units: ticks
+TickType_t gap = pdMS_TO_TICKS(500);   // 50 ticks
+vTaskDelay(gap);                       // task blocks about 500 ms (tick granularity)
 ```
 
-### Static vs Dynamic Allocation
-- **Dynamic** (`xTaskCreate`, `xQueueCreate`, …): kernel calls `pvPortMalloc`. Needs
-  `configSUPPORT_DYNAMIC_ALLOCATION = 1`.
-- **Static** (`xTaskCreateStatic`, `xQueueCreateStatic`, …): *you* supply the RAM. No heap,
-  deterministic, preferred in safety-critical / certified firmware. Needs
-  `configSUPPORT_STATIC_ALLOCATION = 1`.
+**Counter:** `vTaskDelay(500 / portTICK_PERIOD_MS)` kab zero ho sakta hai? Jab requested milliseconds tick period se chhote hon. Zero tick ka matlab actual wait nahi. `pdMS_TO_TICKS` use karo aur minimum one tick required ho to consciously handle karo.
 
-### Minimal program skeleton
+### Preemptive vs cooperative
+
+- `configUSE_PREEMPTION = 1`: higher-priority task ready hote hi scheduler switch request kar sakta hai. ISR se immediate switch on exit ke liye port yield macro important.
+- Cooperative mode mein running task voluntarily yield/block karegi; **tick aana alone arbitrary preemption guarantee nahi**.
+- `taskYIELD()` ready task ko chance deta hai, **Blocked state nahi** banata. Higher-priority task continuously Ready hai to lower-priority task ko yield se help nahi milegi.
+
+### Task vs ISR vs timer callback
+
+| Context | Allowed thinking |
+|---|---|
+| Normal task | Block, queue/semaphore take, mutex lock, delay (context ke hisaab se) |
+| ISR | Short/fast, only `...FromISR` APIs, **no blocking**, wake flag + port-specific yield |
+| Software timer callback | Timer service task mein chalti hai; **blocking avoid**, lamba work worker task ko bhejo |
+
+---
+
+## 2. Task creation & life-cycle
+
+**Interview story:** Sensor reading aur LED control ko alag tasks chahiye. Dono ke independent stacks honge; scheduler priorities/ready state ke hisaab se chalata hai.
+
+### `xTaskCreate()` — ALL 6 PARAMETERS (most important)
+
+```c
+BaseType_t xTaskCreate(
+    TaskFunction_t pvTaskCode,     // 1
+    const char *pcName,           // 2
+    configSTACK_DEPTH_TYPE usStackDepth, // 3 (exact typedef depends on port)
+    void *pvParameters,           // 4
+    UBaseType_t uxPriority,       // 5
+    TaskHandle_t *pxCreatedTask   // 6
+);
+```
+
+| Param | Exactly kya? | Why / interview trap |
+|---|---|---|
+| `pvTaskCode` | `void task(void *arg)` compatible function pointer | Kernel isi entry function ko task context mein run karega; task must not casually return |
+| `pcName` | Human-readable task name | Debug/log; max configured length |
+| `usStackDepth` / `ulStackDepth` | Stack size | **Vanilla FreeRTOS: StackType_t words; ESP-IDF: bytes** (IDF docs/version confirm). Stack heap allocation se separate concept hai |
+| `pvParameters` | Task ko pass hone wala pointer | Address of stable object pass karo; caller ke expired local variable ka pointer use mat karo |
+| `uxPriority` | Task priority, higher number = higher priority | Importance nahi, responsiveness/deadline ke hisaab se choose karo |
+| `pxCreatedTask` | TaskHandle_t receive karne ka out pointer | Later notify/delete/priority/change ke liye; handle unnecessary ho to `NULL` |
+
+**Return:** `pdPASS` success; otherwise allocation/config related failure (often `errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY`).
+
 ```c
 #include "FreeRTOS.h"
 #include "task.h"
+#include <stdint.h>
+#include <stdio.h>
 
-void vBlink(void *pv) {
+static TaskHandle_t sensorHandle = NULL;
+static int sensorId = 42; // lifetime task se longer honi chahiye
+
+static void sensorTask(void *arg) {
+    int id = *(int *)arg;
     for (;;) {
-        toggle_led();
+        printf("sensor %d at tick %lu\n", id,
+               (unsigned long)xTaskGetTickCount());
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
-int main(void) {
-    hardware_init();
-    xTaskCreate(vBlink, "blink", 128, NULL, 2, NULL);
-    vTaskStartScheduler();   // never returns if it succeeds
-    for (;;);                // only reached if heap for idle/timer task was too small
+void startTasks(void) {
+    BaseType_t ok = xTaskCreate(sensorTask, "sensor", 2048,
+                                &sensorId, 3, &sensorHandle);
+    configASSERT(ok == pdPASS);
 }
+// NOTE: 2048 is bytes for ESP-IDF, but 2048 STACK WORDS in vanilla FreeRTOS.
 ```
 
----
+**Follow-ups:** `pvParameters=(void *)1` possible? Haan agar consciously integer encode kar rahe ho, but portable C mein `(intptr_t)` cast carefully use karo; normal data ke liye actual object pointer safer. `Node*` pass karoge to function mein `(Node *)arg` cast karo.
 
-## 1. Task Management
-
-### Purpose
-Create, delete, suspend, and control tasks — the fundamental unit of execution in FreeRTOS.
-
----
-
-### `xTaskCreate()`
-
+### `xTaskCreatePinnedToCore()` (ESP-IDF)
 ```c
-BaseType_t xTaskCreate(
-    TaskFunction_t  pvTaskCode,      // Function pointer — task entry function
-    const char*     pcName,          // Human readable name — for debugging only
-    uint16_t        usStackDepth,    // Stack size in WORDS (not bytes) on most ports
-    void*           pvParameters,    // Argument passed to task function
-    UBaseType_t     uxPriority,      // Priority — 0 (lowest/Idle) to configMAX_PRIORITIES-1
-    TaskHandle_t*   pxCreatedTask    // Output handle — pass NULL if not needed
-);
-// Returns: pdPASS on success, errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY on failure
+xTaskCreatePinnedToCore(sensorTask, "sensor", 4096,
+                        &sensorId, 5, &sensorHandle, 1);
 ```
-
-**Parameters in detail:**
-
-| Parameter | Type | Notes |
-|---|---|---|
-| `pvTaskCode` | `TaskFunction_t` | Signature `void fn(void *)`. Must **never return** — loop forever or call `vTaskDelete(NULL)`. |
-| `pcName` | `const char*` | Copied into the TCB, truncated to `configMAX_TASK_NAME_LEN` (default 16). Debug/trace only. |
-| `usStackDepth` | `uint16_t` | In **words**, not bytes. On a 32-bit MCU 1 word = 4 bytes, so `128` = 512 bytes. Size it with `uxTaskGetStackHighWaterMark`. |
-| `pvParameters` | `void*` | Passed straight to the task. Common pattern: pointer to a config struct. Must stay valid for the task's lifetime (don't point to a stack local of `main`). |
-| `uxPriority` | `UBaseType_t` | `0` = idle priority (lowest). Max is `configMAX_PRIORITIES - 1`. Values ≥ `configMAX_PRIORITIES` are silently capped. |
-| `pxCreatedTask` | `TaskHandle_t*` | Receives a handle for later `vTaskDelete`/`vTaskSuspend`/notify. `NULL` if you never need to reference the task. |
-
-**Use when:** Dynamic allocation acceptable. Simpler, most common usage.
-
-**Fails when:** Heap exhausted — returns `errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY` (`pdFAIL`) instead of crashing. **Always check the return value.**
-
-**Complete example — passing a parameter struct:**
-```c
-typedef struct { gpio_t pin; uint32_t period_ms; } BlinkCfg_t;
-
-void vBlinkTask(void *pv) {
-    BlinkCfg_t *cfg = (BlinkCfg_t *)pv;   // recover the argument
-    for (;;) {
-        gpio_toggle(cfg->pin);
-        vTaskDelay(pdMS_TO_TICKS(cfg->period_ms));
-    }
-}
-
-// must be static/global so it outlives the create call
-static BlinkCfg_t redCfg = { .pin = LED_RED, .period_ms = 250 };
-
-TaskHandle_t hBlink = NULL;
-if (xTaskCreate(vBlinkTask, "red", 128, &redCfg, 2, &hBlink) != pdPASS) {
-    // handle out-of-memory
-}
-```
-
----
+Same six params + `xCoreID` (core 0/1, or `tskNO_AFFINITY`). **Use when:** specific core affinity/driver constraint/latency analysis. **Not magic:** core pin karne se shared locks, interrupts, cache contention automatically solve nahi hote.
 
 ### `xTaskCreateStatic()`
-
-```c
-TaskHandle_t xTaskCreateStatic(
-    TaskFunction_t  pvTaskCode,
-    const char*     pcName,
-    uint32_t        ulStackDepth,
-    void*           pvParameters,
-    UBaseType_t     uxPriority,
-    StackType_t*    puxStackBuffer,      // YOU provide stack array
-    StaticTask_t*   pxTaskBuffer         // YOU provide Task Control Block memory
-);
-// Returns: Task handle — never NULL (memory provided by caller)
-```
-
-**Why use over xTaskCreate:** No heap dependency. Stack size known at compile time. No fragmentation. Preferred in production firmware. Idle Task cleanup not required.
-
-**Alternate:** `xTaskCreate()` — simpler but heap dependent.
-
----
-
-### `xTaskCreatePinnedToCore()` — ESP32 Specific
-
-```c
-BaseType_t xTaskCreatePinnedToCore(
-    TaskFunction_t  pvTaskCode,
-    const char*     pcName,
-    uint32_t        usStackDepth,
-    void*           pvParameters,
-    UBaseType_t     uxPriority,
-    TaskHandle_t*   pxCreatedTask,
-    BaseType_t      xCoreID          // 0, 1, or tskNO_AFFINITY
-);
-```
-
-**Why use:** Pin task to specific core on ESP32 dual core. WiFi stack pinned to Core 0 by Espressif — pin your tasks to Core 1 to avoid contention.
-
-**Alternate:** `xTaskCreate()` — unpinned, scheduler decides core.
-
----
+Dynamic heap avoid karna ho to application stack buffer + TCB provide karegi. Params: `pvTaskCode`, `pcName`, `ulStackDepth`, `pvParameters`, `uxPriority`, `pxStackBuffer` (caller-owned stack), `pxTaskBuffer` (caller-owned TCB). Returns `TaskHandle_t` or `NULL`. Arrays/storage task lifetime tak valid hone chahiye; enable static allocation in config. ESP-IDF size interpretation differs; static stack buffer element requirements port documentation se verify karo.
 
 ### `vTaskDelete()`
-
-```c
-void vTaskDelete(TaskHandle_t xTaskToDelete);
-// Pass NULL to delete calling task itself
-```
-
-**Important:** Stack and Task Control Block NOT freed immediately. Idle Task cleans up later. If Idle Task starved — memory leak. Use `xTaskCreateStatic()` to avoid this entirely.
-
----
-
-### `vTaskDelay()`
-
-```c
-void vTaskDelay(TickType_t xTicksToDelay);
-// Helper macro: pdMS_TO_TICKS(ms) converts milliseconds to ticks
-// Example: vTaskDelay(pdMS_TO_TICKS(100)); // delay 100ms
-```
-
-**Use when:** Simple delay needed. Task blocks for specified ticks from NOW.
-
-**Problem:** Drift accumulates over time — period = execution time + delay time. Not suitable for strict periodic tasks.
-
-**Alternate:** `vTaskDelayUntil()` — fixed period, no drift.
-
----
-
-### `vTaskDelayUntil()`
-
-```c
-void vTaskDelayUntil(
-    TickType_t* pxPreviousWakeTime,   // Pointer to last wake tick — updated automatically
-    TickType_t  xTimeIncrement        // Period in ticks
-);
-
-// Usage pattern:
-TickType_t xLastWakeTime = xTaskGetTickCount();
-while(1) {
-    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10)); // Exactly 10ms period
-    doWork();
-}
-```
-
-**Why use over vTaskDelay:** Absolute period maintained. Execution time does NOT accumulate into period. Correct for motor control loops, sensor sampling, anything needing fixed frequency.
-
----
+`vTaskDelete(NULL)` means **current task ko delete karo**, handle pass means target task. No immediate blanket guarantee of free RAM: dynamically allocated task resources may need idle-task cleanup; don't starve idle. Ownership of app-owned mallocs, peripherals, mutexes and handles **automatically** clean nahi hoti.
 
 ### `vTaskSuspend()` / `vTaskResume()`
-
-```c
-void vTaskSuspend(TaskHandle_t xTaskToSuspend);  // NULL = suspend self
-void vTaskResume(TaskHandle_t xTaskToResume);
-BaseType_t xTaskResumeFromISR(TaskHandle_t xTaskToResume); // Call from ISR
-```
-
-**Use when:** Need to stop task temporarily without deleting it. RAM retained. No cleanup needed.
-
-**Alternate:** `vTaskDelete()` — permanent. Task Notifications — cleaner for activation/deactivation.
-
----
+Param `xTaskToSuspend` / `xTaskToResume` handle; `NULL` with suspend = self. Use administrative pause; **event wait ke liye suspend/resume mat choose karo** (lost-wakeup races). Queue/semaphore/notification stronger pattern.
 
 ### `vTaskPrioritySet()` / `uxTaskPriorityGet()`
+Params (task handle, new priority) / (task handle). Handle `NULL` = current task. Priority dynamic update rarely needed; mutating priority to fix design without timing analysis risky.
 
-```c
-void vTaskPrioritySet(TaskHandle_t xTask, UBaseType_t uxNewPriority);
-// NULL = calling task
-
-UBaseType_t uxTaskPriorityGet(TaskHandle_t xTask);
-```
-
-**Use when:** Implementing manual Priority Ceiling. FreeRTOS Mutex uses this internally for Priority Inheritance.
+### `xTaskGetCurrentTaskHandle()` / `pcTaskGetName()`
+Current task ka handle / named task ka label for diagnostics. `pcTaskGetName(xTask)` uses target handle; some APIs `NULL` as current task accept karte hain; docs check.
 
 ---
 
-### Debugging APIs
+## 3. Blocking & periodic timing
+
+### `vTaskDelay(xTicksToDelay)`
+Ek param: number of **ticks**. `vTaskDelay(pdMS_TO_TICKS(100))` = next ~100 ms later **Ready** hone ka request; CPU pe exactly us moment Running guarantee nahi. Example: 100ms processing + 500ms delay → cycle **~600ms**, drift possible.
+
+### `vTaskDelayUntil(&xLastWakeTime, xFrequency)`
+- `pxPreviousWakeTime`: pointer to last scheduled wake tick; initialized once via `xTaskGetTickCount()`; API updates it.
+- `xTimeIncrement`: fixed period in ticks.
+- Better when **every 100 ms periodic loop** chahiye; absolute schedule avoids accumulating execution-time drift.
+- Missed deadline? Calculated wake already past, may return immediately; do not claim hard real-time 1kHz guarantee from tick loop.
 
 ```c
-// Stack watermark — minimum free stack words ever recorded
-// 0 = already overflowed
-UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t xTask);
-
-// Print all task states, priorities, stack watermarks
-void vTaskList(char* pcWriteBuffer);
-
-// Print CPU time per task (requires configGENERATE_RUN_TIME_STATS = 1)
-void vTaskGetRunTimeStats(char* pcWriteBuffer);
-
-// Current tick count
-TickType_t xTaskGetTickCount(void);
-
-// Number of tasks currently existing
-UBaseType_t uxTaskGetNumberOfTasks(void);
-```
-
----
-
-### Task Introspection & Utility APIs
-
-```c
-// Handle of the calling task
-TaskHandle_t xTaskGetCurrentTaskHandle(void);
-
-// Look up a task handle by its name (slow — scans the task list)
-TaskHandle_t xTaskGetHandle(const char* pcNameToQuery);
-
-// Current state of a task
-eTaskState eTaskGetState(TaskHandle_t xTask);
-// Returns: eRunning, eReady, eBlocked, eSuspended, eDeleted, eInvalid
-
-// Fill a TaskStatus_t with everything about a task (name, state, prio, stack, runtime)
-void vTaskGetInfo(
-    TaskHandle_t      xTask,
-    TaskStatus_t*     pxTaskStatus,
-    BaseType_t        xGetFreeStackSpace,   // pdTRUE = also compute high-water mark (slow)
-    eTaskState        eState                // eInvalid = let the kernel fetch it
-);
-
-// Snapshot of ALL tasks at once — preferred over vTaskList for machine parsing
-UBaseType_t uxTaskGetSystemState(
-    TaskStatus_t*     pxTaskStatusArray,    // caller-provided array
-    UBaseType_t       uxArraySize,          // number of elements available
-    uint32_t*         pulTotalRunTime       // optional — total run-time counter
-);
-
-// Store/retrieve one user pointer per task (a "thread-local" slot)
-void  vTaskSetApplicationTaskTag(TaskHandle_t xTask, TaskHookFunction_t pxTagValue);
-void  vTaskSetThreadLocalStoragePointer(TaskHandle_t xTask, BaseType_t xIndex, void* pvValue);
-void* pvTaskGetThreadLocalStoragePointer(TaskHandle_t xTask, BaseType_t xIndex);
-```
-
----
-
-### `taskYIELD()` / `taskYIELD_FROM_ISR()`
-
-```c
-taskYIELD();   // voluntarily give up the CPU to another Ready task of >= priority
-```
-
-**Use when:** Cooperative hand-off between equal-priority tasks, or forcing an immediate
-reschedule after you changed something. Rarely needed with preemption enabled — the
-scheduler already switches on every relevant event.
-
----
-
-### Deleting the calling task cleanly
-
-```c
-void vSomeOneShotTask(void *pv) {
-    do_one_time_work();
-    vTaskDelete(NULL);   // NULL = "delete me". Never returns.
-}
-```
-
-**Reminder:** the TCB + stack are reclaimed by the **idle task**, so the idle task must get
-to run. If you delete a task from *another* task, the memory frees on the next idle slice.
-
----
-
-## 1b. Scheduler Control
-
-### Purpose
-Start the scheduler and, when unavoidable, pause/resume all scheduling. Prefer the lighter
-`vTaskSuspendAll`/critical-section tools over stopping the whole scheduler.
-
----
-
-### `vTaskStartScheduler()`
-
-```c
-void vTaskStartScheduler(void);
-// Call once from main() after creating your initial tasks.
-// Does NOT return on success. Returns only if there was not enough heap to
-// create the idle task (and timer task if configUSE_TIMERS = 1).
-```
-
----
-
-### `vTaskSuspendAll()` / `xTaskResumeAll()`
-
-```c
-void       vTaskSuspendAll(void);   // stop context switches — interrupts STILL run
-BaseType_t xTaskResumeAll(void);    // returns pdTRUE if a yield happened on resume
-```
-
-**Difference from a critical section:** interrupts keep firing (ISRs still execute), only
-**task switching** is frozen. Cheaper than disabling interrupts for medium-length
-non-blocking work that touches task-shared data. **You must not call any blocking API while
-the scheduler is suspended.**
-
-```c
-vTaskSuspendAll();
-{
-    // safe from other TASKS (not from ISRs) — no blocking calls allowed
-    update_shared_list();
-}
-xTaskResumeAll();
-```
-
----
-
-### `xTaskGetSchedulerState()`
-
-```c
-BaseType_t xTaskGetSchedulerState(void);
-// taskSCHEDULER_NOT_STARTED | taskSCHEDULER_RUNNING | taskSCHEDULER_SUSPENDED
-```
-
-**Use when:** shared code needs to behave differently before vs after the scheduler starts
-(e.g. a driver init that may run in `main()` or in a task).
-
----
-
-## 2. Queue
-
-### Purpose
-Thread-safe FIFO buffer for passing data between tasks or from Interrupt Service Routine to task. Data COPIED in and out — not passed by reference.
-
----
-
-### `xQueueCreate()`
-
-```c
-QueueHandle_t xQueueCreate(
-    UBaseType_t uxQueueLength,    // Maximum number of items queue can hold
-    UBaseType_t uxItemSize        // Size of each item in bytes
-);
-// Returns: Handle or NULL on failure
-
-// Static variant — you supply the storage
-QueueHandle_t xQueueCreateStatic(
-    UBaseType_t     uxQueueLength,
-    UBaseType_t     uxItemSize,
-    uint8_t*        pucQueueStorage,   // array of (uxQueueLength * uxItemSize) bytes
-    StaticQueue_t*  pxQueueBuffer      // control-structure storage
-);
-```
-
-**Key idea — data is COPIED.** `uxItemSize` is the size of the *thing you copy*. To move
-large or variable objects, make the item a **pointer** (`sizeof(void*)`) and manage the
-buffer's lifetime yourself (the receiver frees it or returns it to a pool).
-
-**Complete producer/consumer example:**
-```c
-typedef struct { uint8_t id; float value; } Reading_t;
-
-QueueHandle_t xReadingQ;
-
-void vProducer(void *pv) {
-    Reading_t r;
+static void controlTask(void *arg) {
+    (void)arg;
+    TickType_t last = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS(100);
+    configASSERT(period > 0);
     for (;;) {
-        r.id = 1; r.value = read_sensor();
-        // block up to 10 ms if the queue is full
-        if (xQueueSend(xReadingQ, &r, pdMS_TO_TICKS(10)) != pdTRUE) {
-            // queue stayed full — drop or count the overflow
+        read_and_control(); // must finish within budget
+        vTaskDelayUntil(&last, period);
+    }
+}
+```
+
+For newer FreeRTOS versions `xTaskDelayUntil()` returns status; `vTaskDelayUntil()` widely used. Enable appropriate INCLUDE flag. < 1-tick resolution or very tight jitter demands hardware timer/peripheral, measure WCET.
+
+### Timeout param pattern you must know
+
+Almost every blocking API has `xTicksToWait` / `xBlockTime`:
+- `0` = **don't wait**, immediate success/fail.
+- `pdMS_TO_TICKS(50)` = wait **up to** ~50ms when resource unavailable.
+- `portMAX_DELAY` = long/indefinite wait **only under relevant config**, e.g. `INCLUDE_vTaskSuspend` matters for indefinite blocking behavior. On finite tick modes behavior/config differs.
+- Wake by event, timeout, or relevant task state operation; API return value tells what happened.
+
+### `xTaskGetTickCount()`, `xTaskGetTickCountFromISR()`
+Return `TickType_t`. First for task context, second for ISR (if supported by port). Tick count can wrap; calculate time deltas using unsigned tick arithmetic carefully; avoid naïve comparisons across rollover.
+
+### `taskYIELD()`
+No args, no blocking; current task voluntarily yields. **Difference:** `vTaskDelay(1)` actually waits at least until next tick; `taskYIELD()` doesn't. **ISR yield macros are distinct**.
+
+---
+
+## 4. Queues & producer-consumer
+
+**Queue kab?** Producer data items bana raha hai, consumer another task process karega; har item ki identity/payload zaroori, burst absorb karna hai. Queue item ko **copy** karti hai, pointer deep-copy nahi hota.
+
+```c
+typedef struct { uint32_t seq; int temperature; } Sample;
+static QueueHandle_t q;
+
+static void producer(void *arg) {
+    (void)arg;
+    Sample s = {0};
+    for (;;) {
+        s.seq++;
+        s.temperature = 25;
+        if (xQueueSend(q, &s, 0) != pdPASS) {
+            // FULL: policy choose karo: drop, count, retry with timeout, etc.
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(10)); // every 10 ms, not 10 seconds
     }
 }
 
-void vConsumer(void *pv) {
-    Reading_t r;
+static void consumer(void *arg) {
+    (void)arg;
+    Sample item;
     for (;;) {
-        if (xQueueReceive(xReadingQ, &r, portMAX_DELAY) == pdTRUE) {
-            printf("id=%u val=%.2f\n", r.id, r.value);
+        if (xQueueReceive(q, &item, portMAX_DELAY) == pdPASS) {
+            process_sample(item);
+            vTaskDelay(pdMS_TO_TICKS(100)); // artificial slow consumer
         }
     }
 }
 
-void app_init(void) {
-    xReadingQ = xQueueCreate(8, sizeof(Reading_t));   // 8 items deep
-    configASSERT(xReadingQ != NULL);
-    xTaskCreate(vProducer, "prod", 256, NULL, 2, NULL);
-    xTaskCreate(vConsumer, "cons", 256, NULL, 2, NULL);
+void demo(void) {
+    q = xQueueCreate(5, sizeof(Sample));
+    configASSERT(q);
+    xTaskCreate(producer, "producer", 2048, NULL, 3, NULL);
+    xTaskCreate(consumer, "consumer", 2048, NULL, 2, NULL);
 }
 ```
 
----
+**Trace:** Producer every 10 ms, consumer consumes one every 100 ms. Queue capacity 5 eventually full. `xQueueSend(q,&s,0)` **returns immediately with `errQUEUE_FULL` / `pdFAIL`**; producer does **not** block on send. If producer high priority and replaces delay with endless retry, consumer lower priority **starve** ho sakta hai → queue kabhi drain hi nahi hogi. Policy: finite block timeout, data drop/backpressure, or consumer redesign.
 
-### `xQueueSend()` / `xQueueSendToBack()`
+**Counter:** `xQueueReceive` with wait while queue empty → consumer **Blocked**. `xQueueSend` with nonzero wait while full → producer **Blocked** until space/timeout. Both states depend on queue condition AND timeout. `xQueueReceive` removes element, `xQueuePeek` does not.
 
-```c
-BaseType_t xQueueSend(
-    QueueHandle_t xQueue,
-    const void*   pvItemToQueue,   // Pointer to data to copy in
-    TickType_t    xTicksToWait     // How long to block if queue full. 0 = don't wait. portMAX_DELAY = wait forever
-);
-// Returns: pdTRUE on success, errQUEUE_FULL on timeout
-```
+### Queue memory/copy model
+`xQueueCreate(5,sizeof(Sample))` allocates storage for up to five **value copies**, plus control metadata. Queue-pointer pattern `xQueueCreate(5,sizeof(Sample *))` queues addresses, so pointee must remain valid until consumer returns buffer; use static objects / pool + ownership protocol, never pointer to expired stack local.
 
----
-
-### `xQueueSendToFront()`
-
-```c
-BaseType_t xQueueSendToFront(
-    QueueHandle_t xQueue,
-    const void*   pvItemToQueue,
-    TickType_t    xTicksToWait
-);
-```
-
-**Why use over xQueueSend:** Inserts at FRONT — highest priority message jumps queue. Emergency/urgent message use case.
+### APIs: quick choices
+- `xQueueSendToBack` / `xQueueSend`: normal FIFO enqueue.
+- `xQueueSendToFront`: urgent item front (beware unfairness).
+- `xQueueReceive`: dequeue + copy into caller's output.
+- `xQueuePeek`: inspect without removal.
+- `uxQueueMessagesWaiting`: momentary count (race if used for correctness).
+- `xQueueReset`: discard queued items; synchronize callers before reset.
+- `vQueueDelete`: cleanup, only when nobody still uses the queue.
+- `xQueueSendFromISR` / `xQueueReceiveFromISR`: ISR-safe, **no wait argument**.
+- `xQueueOverwrite`: only **length-1 queue / mailbox**, latest value wins.
 
 ---
 
-### `xQueueSendFromISR()` — CRITICAL
+## 5. Binary & counting semaphores
+
+**Semaphore gives permission/event; payload nahi.**
+
+### Binary semaphore (0/1)
+`xSemaphoreCreateBinary()` no params; newly created semaphore initially unavailable, so task waits until `Give`. `xSemaphoreTake(sem, ticks)` acquires; `xSemaphoreGive(sem)` signals. Use e.g. GPIO ISR -> worker task. Multiple gives while full **collapse**, no event count; from ISR use `xSemaphoreGiveFromISR`. **No ownership, no priority inheritance.** Do **not** replace mutex for priority-sensitive resource sharing.
+
+### Counting semaphore (0..N)
+`xSemaphoreCreateCounting(uxMaxCount, uxInitialCount)`:
+- max: legal highest count / capacity.
+- initial: tokens available on creation, must be ≤ max.
+- Events: start 0, give per event, take per event. Bounded capacity; excess give can fail. Resource pool: start N, take before acquiring one, give after releasing.
+- Sem count alone doesn't identify which specific resource; for resource IDs use queue of handles.
 
 ```c
-BaseType_t xQueueSendFromISR(
-    QueueHandle_t xQueue,
-    const void*   pvItemToQueue,
-    BaseType_t*   pxHigherPriorityTaskWoken  // Set to pdTRUE if higher priority task unblocked
-);
-// MUST call portYIELD_FROM_ISR(pxHigherPriorityTaskWoken) after
-```
+static SemaphoreHandle_t events;
 
-**Why separate API exists:** Interrupt Service Routines CANNOT block. Standard `xQueueSend()` can block — illegal in ISR context. FromISR version never blocks — returns immediately with error if queue full.
-
-**Always pair with:**
-```c
-portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
-// Forces immediate context switch if higher priority task was unblocked
-```
-
----
-
-### `xQueueReceive()`
-
-```c
-BaseType_t xQueueReceive(
-    QueueHandle_t xQueue,
-    void*         pvBuffer,        // Buffer to copy received data into
-    TickType_t    xTicksToWait
-);
-// Item REMOVED from queue after receive
-```
-
----
-
-### `xQueuePeek()`
-
-```c
-BaseType_t xQueuePeek(
-    QueueHandle_t xQueue,
-    void*         pvBuffer,
-    TickType_t    xTicksToWait
-);
-// Item NOT removed — stays in queue
-```
-
-**Use when:** Want to inspect front item without consuming it. Mailbox read pattern.
-
----
-
-### `uxQueueMessagesWaiting()`
-
-```c
-UBaseType_t uxQueueMessagesWaiting(QueueHandle_t xQueue);
-// Returns number of items currently in queue
-```
-
----
-
-### Queue vs Alternatives
-
-| Need | Use |
-|---|---|
-| Pass data task to task | Queue |
-| Signal without data | Binary Semaphore or Task Notification |
-| Latest value only | Mailbox (Queue size 1 + xQueueOverwrite) |
-| Single uint32 value fast | Task Notification |
-
----
-
-### Other Queue APIs
-
-```c
-// Space remaining before the queue is full
-UBaseType_t uxQueueSpacesAvailable(QueueHandle_t xQueue);
-
-// Empty a queue — discards all items
-BaseType_t  xQueueReset(QueueHandle_t xQueue);
-
-// Delete a queue and free its memory (dynamic queues only)
-void        vQueueDelete(QueueHandle_t xQueue);
-
-// ISR-safe inspection
-BaseType_t  xQueueIsQueueEmptyFromISR(const QueueHandle_t xQueue);
-BaseType_t  xQueueIsQueueFullFromISR(const QueueHandle_t xQueue);
-UBaseType_t uxQueueMessagesWaitingFromISR(const QueueHandle_t xQueue);
-
-// Give a queue a name in the kernel registry (for debuggers like Ozone/Tracealyzer)
-void        vQueueAddToRegistry(QueueHandle_t xQueue, const char* pcName);
-```
-
----
-
-## 2b. Queue Sets
-
-### Purpose
-Block on **several queues and/or semaphores at once**. A task waits on the *set*; when any
-member has data/is signalled, the set tells you which one. This is the FreeRTOS answer to
-"select()" — needed when one task must service multiple sources and Task Notifications /
-Event Groups don't fit.
-
-> Requires `configUSE_QUEUE_SETS = 1`.
-
----
-
-### APIs
-
-```c
-QueueSetHandle_t xQueueCreateSet(UBaseType_t uxEventQueueLength);
-// uxEventQueueLength MUST equal the SUM of the lengths of all queues/semaphores added
-// (each counting-sem counts as its max count, each binary sem/mutex as 1).
-
-BaseType_t xQueueAddToSet(QueueSetMemberHandle_t xQueueOrSemaphore, QueueSetHandle_t xQueueSet);
-BaseType_t xQueueRemoveFromSet(QueueSetMemberHandle_t xQueueOrSemaphore, QueueSetHandle_t xQueueSet);
-
-// Blocks until any member is ready; returns the handle of the ready member (or NULL on timeout)
-QueueSetMemberHandle_t xQueueSelectFromSet(QueueSetHandle_t xQueueSet, TickType_t xTicksToWait);
-QueueSetMemberHandle_t xQueueSelectFromSetFromISR(QueueSetHandle_t xQueueSet);
-```
-
-**Complete example — one task serving a data queue and a control semaphore:**
-```c
-QueueHandle_t     xDataQ  = xQueueCreate(5, sizeof(Reading_t));
-SemaphoreHandle_t xStopSem = xSemaphoreCreateBinary();
-QueueSetHandle_t  xSet    = xQueueCreateSet(5 + 1);   // 5 + 1
-
-xQueueAddToSet(xDataQ,  xSet);
-xQueueAddToSet(xStopSem, xSet);
-
-void vServiceTask(void *pv) {
+void init_events(void) {
+    events = xSemaphoreCreateCounting(10, 0);
+    configASSERT(events);
+}
+void worker(void *arg) {
+    (void)arg;
     for (;;) {
-        QueueSetMemberHandle_t m = xQueueSelectFromSet(xSet, portMAX_DELAY);
-        if (m == xDataQ) {
-            Reading_t r;
-            xQueueReceive(xDataQ, &r, 0);   // guaranteed non-blocking now
-            process(&r);
-        } else if (m == xStopSem) {
-            xSemaphoreTake(xStopSem, 0);
-            break;
+        if (xSemaphoreTake(events, portMAX_DELAY) == pdTRUE) {
+            handle_one_event();
         }
     }
+}
+// ISR: BaseType_t hpw = pdFALSE;
+// xSemaphoreGiveFromISR(events, &hpw);
+// portYIELD_FROM_ISR(hpw);  // macro/signature is port-specific
+```
+
+**Comparison:** Single known receiving task + no payload → **task notification counter** often lighter. Many eligible waiters / independent reusable resource count → **counting semaphore**. Data payload chahiye → **queue**.
+
+---
+
+## 6. Mutex, recursive mutex & priority inversion
+
+**Mutex = resource ownership lock**, not event. E.g. same I2C bus / UART / shared structure pe 2 tasks; one task lock, access, **same task unlock**. Mutex supports **priority inheritance** (implementation limitations apply); ISR mein take/give nahi. Binary semaphore lacks ownership and inheritance.
+
+```c
+static SemaphoreHandle_t uartLock;
+void init_uart(void) {
+    uartLock = xSemaphoreCreateMutex();
+    configASSERT(uartLock);
+}
+void send_packet(const uint8_t *data, size_t len) {
+    if (xSemaphoreTake(uartLock, pdMS_TO_TICKS(200)) == pdTRUE) {
+        uart_send(data, len); // ensure this is finished/safe before give
+        xSemaphoreGive(uartLock);
+    } else {
+        record_uart_timeout();
+    }
+}
+```
+
+### Priority inversion with 3 tasks (must explain)
+1. Low priority **L** mutex holds; before release, high priority **H** requests → H Blocked.
+2. Medium priority **M** (mutex doesn't need) Ready ho kar L ko preempt karta hai; H indirectly waits behind M = **unbounded priority inversion risk**.
+3. With inheritance, L temporarily inherits H's higher priority while it holds mutex and H waits; L runs, unlocks, H proceeds. Does not fix deadlocks or long critical sections.
+4. Multi-mutex/ESP-IDF specifics mein inheritance details simplified ho sakte hain. Always short lock scope + lock ordering.
+
+### Recursive mutex
+`xSemaphoreCreateRecursiveMutex()` / `xSemaphoreTakeRecursive(m,ticks)` / `xSemaphoreGiveRecursive(m)`. Same owning task multiple lock levels le sakta hai; **matching number of gives** required. Normal mutex same task repeat take se deadlock/timeout ho sakta hai. Prefer refactor to single ownership when practical.
+
+**Critical section vs mutex:** Very short shared state update + no blocking operation → critical section/atomic primitive. Bus I/O or operations that can block → mutex (critical section ke andar delay/I2C/network wait mat karo). SMP multi-core protection architecture-specific.
+
+---
+
+## 7. Direct task notifications
+
+**Use case:** ISR ko *exactly one known task* wake karna hai. Task ke TCB mein 32-bit notification value/state; separate semaphore object ki need nahi. **Receiver is task**, unrelated tasks cannot wait on same notification slot. Task notification array enabled ho to multiple slots, but task simultaneously only one slot pe block kar sakta hai.
+
+```c
+static TaskHandle_t handlerTaskHandle;
+static void handlerTask(void *unused) {
+    (void)unused;
+    for (;;) {
+        uint32_t count = ulTaskNotifyTake(pdFALSE, portMAX_DELAY);
+        // pdFALSE = decrement by 1, return previous value
+        // If count > 1, next calls process remaining events.
+        process_one_irq_event();
+    }
+}
+// In valid FreeRTOS-callable ISR context:
+// BaseType_t hpw = pdFALSE;
+// vTaskNotifyGiveFromISR(handlerTaskHandle, &hpw);
+// portYIELD_FROM_ISR(hpw);
+```
+
+- `xTaskNotifyGive(handle)` increment notification count, from task context.
+- `vTaskNotifyGiveFromISR(handle,&higherPriorityWoken)` ISR equivalent.
+- `ulTaskNotifyTake(pdTRUE,ticks)` clear full value to 0 on exit = binary/batch-style behavior; **may coalesce events**.
+- `ulTaskNotifyTake(pdFALSE,ticks)` decrement by 1 on exit = counting-style behavior.
+- `xTaskNotify(handle,value,eAction)` flexible mode: set bits, increment, overwrite, no-overwrite, no-action.
+- `xTaskNotifyWait(clearOnEntry,clearOnExit,&outValue,ticks)` wait on pending notification + optional bit clear. **Not equivalent to count-taking**; notification state and value semantics matter.
+- `xTaskNotifyFromISR` ISR variant, see action and wake parameters.
+- `xTaskNotifyIndexed` etc: specific indexed slot, index within `configTASK_NOTIFICATION_ARRAY_ENTRIES`.
+
+**eNotifyAction quick map:** `eNoAction` = state only; `eSetBits` = OR mask; `eIncrement` = count++; `eSetValueWithOverwrite` = latest 32-bit value; `eSetValueWithoutOverwrite` = can fail if still pending.
+
+**Interview trap:** `ulTaskNotifyTake(pdFALSE)` function returns **pre-decrement** count, not "exactly number processed". One call = one token consumed. Notification value can overflow on extreme counts; no magical unbounded lossless guarantee.
+
+---
+
+## 8. Event groups
+
+**Use case:** App should run only when Wi-Fi connected **AND** sensor calibrated **AND** storage ready; or react when *any* fault flag set. Each condition gets one bit in `EventBits_t`; no payload or arrival count. Bits remain set until cleared; races require protocol.
+
+```c
+#define WIFI_BIT   (1U << 0)
+#define SENSOR_BIT (1U << 1)
+static EventGroupHandle_t readyFlags;
+
+void network_task(void *arg) {
+    (void)arg;
+    wifi_connect();
+    xEventGroupSetBits(readyFlags, WIFI_BIT);
+    vTaskDelete(NULL);
+}
+void app_task(void *arg) {
+    (void)arg;
+    EventBits_t bits = xEventGroupWaitBits(
+        readyFlags, WIFI_BIT | SENSOR_BIT,
+        pdFALSE,    // do NOT auto-clear flags
+        pdTRUE,     // wait for ALL requested bits
+        portMAX_DELAY
+    );
+    (void)bits;
+    run_app();
     vTaskDelete(NULL);
 }
 ```
 
-**Caveats:**
-- You must still **receive/take** from the returned member — the set only tells you *which*.
-- A queue or semaphore can be in **only one set** and must be empty when added.
-- Mutexes should not be added (priority inheritance interacts badly). Use for queues,
-  binary and counting semaphores.
-- **Alternative:** if the sources are simple flags, an **Event Group** is lighter than a queue set.
+- `xEventGroupCreate()` returns handle or NULL.
+- `xEventGroupSetBits(group,bits)` OR given bits; from ISR different API behavior (**deferred to timer task**); check return.
+- `xEventGroupWaitBits(group,mask,clearOnExit,waitForAll,ticks)`: **five params**, AND/OR controlled by `waitForAll`; auto-clear only if appropriate; returns observed bits.
+- `xEventGroupClearBits(group,bits)` clears bits.
+- `xEventGroupGetBits(group)` snapshot, not atomic wait.
+- `xEventGroupSync(group,bitToSet,allBits,ticks)`: barrier for multiple tasks, announce+wait atomic wrt sync semantics; each participant unique bit. Limited usable bits (typically 8 or 24 depending on tick width/config).
+- **Alternative:** per-task notifications for only one receiver; event groups for flag combinations and broadcast-style conditions.
 
 ---
 
-## 3. Semaphore — Binary
+## 9. Software timers
 
-### Purpose
-Signaling between tasks or from Interrupt Service Routine to task. No data transferred — pure event notification. No ownership.
-
----
-
-### `xSemaphoreCreateBinary()`
+**Use case:** Button press ke 5 seconds baad idle-off; repeated press par reset. Timer service task callbacks execute karta hai, **callback ke andar blocking/long loops mat karo**.
 
 ```c
-SemaphoreHandle_t xSemaphoreCreateBinary(void);
-// Created in EMPTY state (0) — must Give before first Take succeeds
-```
-
----
-
-### `xSemaphoreGive()` / `xSemaphoreTake()`
-
-```c
-BaseType_t xSemaphoreGive(SemaphoreHandle_t xSemaphore);
-
-BaseType_t xSemaphoreTake(
-    SemaphoreHandle_t xSemaphore,
-    TickType_t        xTicksToWait
-);
-```
-
----
-
-### `xSemaphoreGiveFromISR()` — Classic ISR to Task Pattern
-
-```c
-BaseType_t xSemaphoreGiveFromISR(
-    SemaphoreHandle_t xSemaphore,
-    BaseType_t*       pxHigherPriorityTaskWoken
-);
-
-// Full ISR to Task pattern:
-SemaphoreHandle_t xSemaphore;
-
-void IRAM_ATTR sensorISR(void) {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+static TimerHandle_t idleTimer;
+static void idle_cb(TimerHandle_t timer) {
+    (void)timer;
+    // SHORT callback; no blocking
+    turn_off_idle_indicator();
 }
-
-void sensorTask(void* param) {
-    while(1) {
-        xSemaphoreTake(xSemaphore, portMAX_DELAY); // Blocks until ISR fires
-        processSensorData();
+void timers_init(void) {
+    idleTimer = xTimerCreate("idle", pdMS_TO_TICKS(5000),
+                             pdFALSE, NULL, idle_cb);
+    configASSERT(idleTimer != NULL);
+}
+void on_button_press_task_context(void) {
+    // start if stopped / restart expiry if already active
+    if (xTimerReset(idleTimer, pdMS_TO_TICKS(10)) != pdPASS) {
+        record_timer_command_failure();
     }
 }
 ```
 
-**Why Binary Semaphore over Mutex for ISR signaling:** Mutex has ownership — only taker can give. ISR and task are different contexts — ISR cannot "own" mutex. Binary Semaphore has no ownership — ISR can Give, task can Take.
-
-**Why Binary Semaphore over Task Notification:** Multiple tasks can wait on one semaphore. Task Notification is per-task — only one task can wait.
-
----
-
-## 4. Semaphore — Counting
-
-### Purpose
-Manage pool of identical resources. Tracks count of available resources. Multiple tasks can acquire simultaneously up to pool size.
+- `xTimerCreate(name,period,autoReload,timerID,callback)`: name debug; period in ticks; `pdFALSE` one-shot / `pdTRUE` periodic; ID user data pointer; callback signature `void cb(TimerHandle_t)`.
+- `xTimerStart(timer,ticksToWait)` enqueues start command; command-queue wait parameter **timer delay nahi**, timer period creation pe decided.
+- `xTimerReset(timer,ticksToWait)` resets expiry relative to processing/start semantics; debounce-style.
+- `xTimerStop(timer,ticksToWait)` stop command; `xTimerChangePeriod(timer,newPeriod,ticksToWait)` changes period.
+- `xTimerDelete(timer,ticksToWait)` deletes timer; ensure no unsafe concurrent use.
+- FromISR timer control APIs exist; use `...FromISR` with wake flag. Callback itself is **not ISR**, still shouldn't block shared daemon task.
+- **Alternative:** dedicated task + `vTaskDelayUntil` for substantial periodic work; HW timer for sub-tick deadlines.
 
 ---
 
-### `xSemaphoreCreateCounting()`
+## 10. Stream/message buffers, mailbox & queue sets
 
-```c
-SemaphoreHandle_t xSemaphoreCreateCounting(
-    UBaseType_t uxMaxCount,      // Maximum count value (pool size)
-    UBaseType_t uxInitialCount   // Starting count
-);
-```
+### Stream buffer = continuous bytes
+UART RX stream: bytes from one writer to one reader; no message boundaries. `xStreamBufferCreate(capacity,triggerLevel)`: capacity bytes; trigger level controls how many bytes typically unblock waiting receiver (timeout can return earlier); `xStreamBufferSend(handle,data,len,ticks)`, `xStreamBufferReceive(handle,out,maxLen,ticks)` return **byte count** (not pdPASS). One writer / one reader default assumption; multiple writers/readers require external synchronization. `...FromISR` available.
 
-**Use case — 3 UART ports:**
-```c
-SemaphoreHandle_t uartPool = xSemaphoreCreateCounting(3, 3);
+### Message buffer = variable-length framed packets
+`xMessageBufferCreate(capacityBytes)`: variable-length messages with length header overhead. `xMessageBufferSend(handle,msg,len,ticks)` returns bytes written; `xMessageBufferReceive(handle,out,maxLen,ticks)` returns message size, 0 on no receive / insufficient buffer; if output too small, message remains. One writer / one reader default; multiple producers need mutex or prefer queue/pool design. Neither message nor stream buffers act as a universal multi-producer queue by default.
 
-// Task acquires one port
-xSemaphoreTake(uartPool, portMAX_DELAY); // count: 3→2
-// use port
-xSemaphoreGive(uartPool);                // count: 2→3
+### Mailbox = only latest value
+`QueueHandle_t latest = xQueueCreate(1,sizeof(Sample));` then `xQueueOverwrite(latest,&s)`. Receiver `xQueuePeek` for current value without removing. Multi-reader access and *freshness signaling* require design attention: peek alone doesn't block for new value. Length must be one for overwrite.
 
-// When count = 0 → all tasks block until a port is released
-```
-
-**Use case — event counting:**
-```c
-// ISR fires multiple times before task processes
-// Binary Semaphore would lose events — only holds 0 or 1
-// Counting Semaphore accumulates — each Give increments count
-// Task calls Take once per event — processes all accumulated events
-SemaphoreHandle_t eventCounter = xSemaphoreCreateCounting(10, 0);
-```
-
-**Alternate:** Queue with dummy data for counting. Task Notifications with eIncrement action.
+### Queue sets = one consumer waits on several objects
+`xQueueCreateSet(maxMembersPending)`, `xQueueAddToSet(queueOrSemaphore,set)`, `xQueueSelectFromSet(set,ticks)` → returns ready member, then read **that member**; remove via `xQueueRemoveFromSet`. Set capacity must cover sum of event capacities of members. Don't read member directly while in set without following selection rules. Useful but extra complexity; often better architecture is single common queue containing tagged events.
 
 ---
 
-### Semaphore Utility APIs (all semaphore types)
+## 11. ISR & context switches
+
+### The exact ISR wake-up sequence
+1. Task B (high priority) `xSemaphoreTake`/`ulTaskNotifyTake` par **Blocked** hai. Task A lower priority running.
+2. Interrupt aaya. ISR `xSemaphoreGiveFromISR` or `vTaskNotifyGiveFromISR` B ko Ready bana sakta hai.
+3. `pxHigherPriorityTaskWoken` initially `pdFALSE`. Kernel may set to `pdTRUE` if higher-priority task unblock hua.
+4. `portYIELD_FROM_ISR(hpw)` (or port-specific equivalent) ISR exit par reschedule request karta hai → B **next tick ka wait kiye bina** run kar sakta hai.
+5. Agar yield request nahi ki, B Ready hone ke bawajood later scheduling point tak wait kar sakta hai. ESP32/other ports and ISR nesting affect exact mechanism.
 
 ```c
-// Current count: 0/1 for binary & mutex, 0..max for counting.
-UBaseType_t uxSemaphoreGetCount(SemaphoreHandle_t xSemaphore);
-
-// Give/Take from an ISR
-BaseType_t xSemaphoreTakeFromISR(SemaphoreHandle_t xSemaphore, BaseType_t* pxHigherPriorityTaskWoken);
-BaseType_t xSemaphoreGiveFromISR(SemaphoreHandle_t xSemaphore, BaseType_t* pxHigherPriorityTaskWoken);
-
-// Which task currently holds a mutex (NULL if free). Debugging aid.
-TaskHandle_t xSemaphoreGetMutexHolder(SemaphoreHandle_t xMutex);
-
-// Free the object (dynamic only)
-void vSemaphoreDelete(SemaphoreHandle_t xSemaphore);
-
-// Static creation variants — you provide the StaticSemaphore_t
-SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t* pxBuffer);
-SemaphoreHandle_t xSemaphoreCreateCountingStatic(UBaseType_t max, UBaseType_t initial, StaticSemaphore_t* pxBuffer);
-SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t* pxBuffer);
-```
-
-**Return-value rule (Take):** `xSemaphoreTake` returns `pdTRUE` only if it actually obtained
-the semaphore. On timeout it returns `pdFALSE` — **always branch on it**; treating a timeout
-as success is the classic cause of "it works until the bus is busy" bugs.
-
----
-
-## 5. Mutex
-
-### Purpose
-Mutual exclusion — protect shared resource with OWNERSHIP guarantee. Only task that locked can unlock. Has Priority Inheritance built in.
-
----
-
-### `xSemaphoreCreateMutex()`
-
-```c
-SemaphoreHandle_t xSemaphoreCreateMutex(void);
-// Created in GIVEN state — ready to take immediately
-```
-
-**What makes Mutex different from Binary Semaphore:**
-
-| Property | Mutex | Binary Semaphore |
-|---|---|---|
-| Ownership | YES — only taker can give | NO |
-| Priority Inheritance | YES — automatic | NO |
-| Use case | Protect shared resource | Signal between tasks/ISR |
-| Can Give from ISR | NO — ISR has no ownership | YES |
-| Recursive | No (use Recursive Mutex) | No |
-
----
-
-### `xSemaphoreCreateRecursiveMutex()`
-
-```c
-SemaphoreHandle_t xSemaphoreCreateRecursiveMutex(void);
-
-// Must use matching recursive APIs:
-xSemaphoreTakeRecursive(xMutex, xTicksToWait);
-xSemaphoreGiveRecursive(xMutex);
-```
-
-**Why use:** Same task can lock same mutex multiple times without deadlocking itself. Each Take must be matched by a Give. Use when recursive functions need to acquire same mutex.
-
-**Alternate:** Non-recursive mutex — simpler, but causes deadlock if same task tries to lock twice.
-
----
-
-### Mutex UART Protection Example
-
-```c
-SemaphoreHandle_t uartMutex = xSemaphoreCreateMutex();
-
-void Task1(void* param) {
-    while(1) {
-        xSemaphoreTake(uartMutex, portMAX_DELAY);
-        // Only Task1 can release — no other task can steal UART mid-transmission
-        HAL_UART_Transmit(&huart1, data1, len1, HAL_MAX_DELAY);
-        xSemaphoreGive(uartMutex);
-    }
+void gpio_isr_example(void) {
+    BaseType_t hpw = pdFALSE;
+    vTaskNotifyGiveFromISR(handlerTaskHandle, &hpw);
+    portYIELD_FROM_ISR(hpw); // Check exact supported macro/port signature!
 }
 ```
 
----
+**Never:** Task-context `xQueueSend` / `xSemaphoreTake` / `vTaskDelay` ISR mein. Also don't use mutex from ISR. ISR FreeRTOS API eligibility is affected by **interrupt priority/level**, especially Cortex-M `configMAX_SYSCALL_INTERRUPT_PRIORITY` and ESP-IDF ISR allocation flags/IRAM requirements.
 
-## 6. Mailbox
+### Yield API differences
+- `taskYIELD()` = task-context voluntary yield; no event wait.
+- `portYIELD_FROM_ISR(x)` = common port macro, request switch if `x` true; exact signature varies.
+- `portEND_SWITCHING_ISR(x)` = alternative port convention.
+- `taskYIELD_FROM_ISR()` = present on some ports; not universally portable. Look at portmacro.h. Don't assume all three interchangeable with same arguments.
 
-### Purpose
-Share LATEST state value between tasks. Any task can read without consuming. Writer overwrites without waiting for reader. Queue of size 1 with special APIs.
+### Critical section
+`taskENTER_CRITICAL()` / `taskEXIT_CRITICAL()` (single-core vanilla examples). **ESP-IDF SMP uses portMUX_TYPE spinlock arguments** to its critical-section macros; follow installed IDF headers. Critical section must be short, contain no blocking; interrupts are masked/spinlocking per port. For shared hardware, mutex usually right primitive.
 
----
-
-### Create Mailbox
-
-```c
-// Mailbox = Queue of length 1
-QueueHandle_t xMailbox = xQueueCreate(1, sizeof(SensorData_t));
-```
+### Scheduler suspension
+`vTaskSuspendAll()` / `xTaskResumeAll()` temporarily suspend task scheduling on relevant kernel/port; **does NOT simply disable hardware interrupts**. Not replacement for ISR-safe atomic mutual exclusion, especially SMP. `xTaskGetSchedulerState()` returns `taskSCHEDULER_NOT_STARTED` / `taskSCHEDULER_RUNNING` / `taskSCHEDULER_SUSPENDED` when enabled.
 
 ---
 
-### `xQueueOverwrite()`
+## 12. Memory, stack, debugging & configuration
 
-```c
-BaseType_t xQueueOverwrite(
-    QueueHandle_t xQueue,
-    const void*   pvItemToQueue
-);
-// Overwrites existing value — NEVER blocks even if queue full
-// Queue must be length 1
+**Two separate things:** Heap allocates queues/TCBs/stacks in dynamic-creation paths; each task's stack stores local variables, return addresses, call frames. Huge local arrays / deep recursion stack overflow kar sakte hain even when heap free.
 
-BaseType_t xQueueOverwriteFromISR(
-    QueueHandle_t xQueue,
-    const void*   pvItemToQueue,
-    BaseType_t*   pxHigherPriorityTaskWoken
-);
-```
+- `pvPortMalloc(size)`: kernel-managed heap allocate; returns pointer/NULL. `vPortFree(ptr)` releases where heap scheme supports freeing. Heap_1 no free, heap_2/4/5 have different allocation/fragmentation/coalescing; choose port/project scheme.
+- `xPortGetFreeHeapSize()`: current free bytes; `xPortGetMinimumEverFreeHeapSize()`: runtime low-water minimum. Enough free bytes != guarantee contiguous block.
+- `uxTaskGetStackHighWaterMark(taskHandle)`: minimum free task stack remaining observed so far; **vanilla FreeRTOS units are StackType_t words; ESP-IDF bytes**. `NULL` current task. Very low → enlarge stack/inspect.
+- `vApplicationStackOverflowHook(task,name)`: optional callback if overflow checking enabled; hook is diagnostic, not guaranteed to catch every corruption.
+- `vApplicationMallocFailedHook()`: optional allocation-failure hook when configured.
+- `vApplicationIdleHook()`: idle work, never block. Idle task also involved in some deletion cleanup.
+- `vApplicationTickHook()`: tick context, keep very short, ISR constraints.
+- `vTaskGetInfo`, `uxTaskGetSystemState`, `vTaskList`, `vTaskGetRunTimeStats`: debugging/statistics depend on config and appropriate counter support; don't call expensive diagnostics in hard real-time path.
 
----
+### Config flags worth remembering
 
-### Read Mailbox Without Consuming
-
-```c
-// Peek — read without removing
-xQueuePeek(xMailbox, &sensorData, portMAX_DELAY);
-// Multiple tasks can peek same value
-// Value stays for next reader
-```
-
-**Mailbox vs Queue:**
-
-| | Queue | Mailbox |
-|---|---|---|
-| Size | N items | 1 item only |
-| Old data | Preserved until read | Overwritten by new data |
-| Multiple readers | Each gets different item | All readers see same latest value |
-| Use case | Message passing | Shared state / latest value |
-
-**Real use case:** Temperature sensor task writes latest reading to mailbox every 100ms. Multiple display/control tasks all peek same latest value independently.
-
----
-
-## 7. Task Notifications
-
-### Purpose
-Lightweight, fast signaling directly to a specific task. Built into Task Control Block — no separate object needed. Faster and uses less RAM than semaphore/queue.
-
----
-
-### `xTaskNotifyGive()` / `ulTaskNotifyTake()`
-
-```c
-// Simplified notify — acts like binary or counting semaphore
-BaseType_t xTaskNotifyGive(TaskHandle_t xTaskToNotify);
-
-// FromISR version
-vTaskNotifyGiveFromISR(
-    TaskHandle_t xTaskToNotify,
-    BaseType_t*  pxHigherPriorityTaskWoken
-);
-
-// Receiving task
-uint32_t ulTaskNotifyTake(
-    BaseType_t xClearCountOnExit,   // pdTRUE = binary semaphore behavior
-                                     // pdFALSE = counting semaphore behavior
-    TickType_t xTicksToWait
-);
-```
-
----
-
-### `xTaskNotify()` / `xTaskNotifyWait()`
-
-```c
-// Full featured — can send 32-bit value
-BaseType_t xTaskNotify(
-    TaskHandle_t xTaskToNotify,
-    uint32_t     ulValue,
-    eNotifyAction eAction    // How to update notification value:
-                             // eNoAction — just unblock task
-                             // eSetBits — OR value into notification
-                             // eIncrement — increment notification value
-                             // eSetValueWithOverwrite — overwrite value
-                             // eSetValueWithoutOverwrite — only if task not already notified
-);
-
-// Receiving task waits for notification
-BaseType_t xTaskNotifyWait(
-    uint32_t ulBitsToClearOnEntry,   // Clear these bits when entering wait
-    uint32_t ulBitsToClearOnExit,    // Clear these bits when exiting wait
-    uint32_t* pulNotificationValue,  // Output — notification value
-    TickType_t xTicksToWait
-);
-```
-
----
-
-### Task Notification vs Semaphore
-
-| | Task Notification | Semaphore / Queue |
-|---|---|---|
-| RAM overhead | Zero — in Task Control Block | Separate object needed |
-| Speed | Faster | Slightly slower |
-| Multiple waiters | NO — only target task | YES — multiple tasks can wait |
-| Send to specific task | YES | NO — whoever takes first gets it |
-| Use case | One sender, one receiver | Multiple senders or receivers |
-
-**Best use case for Task Notifications:**
-```c
-// ISR signals exactly one known task — fastest possible mechanism
-void IRAM_ATTR gpioISR(void) {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    vTaskNotifyGiveFromISR(xHandlerTask, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-}
-
-void handlerTask(void* param) {
-    while(1) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // Wait for ISR signal
-        handleGPIOEvent();
-    }
-}
-```
-
----
-
-### `eNotifyAction` — all five actions explained
-
-`xTaskNotify(handle, value, action)` updates the target's 32-bit notification value
-according to `action`:
-
-| Action | Effect on notification value | Return | Mimics |
-|---|---|---|---|
-| `eNoAction` | Unchanged — just unblocks the task | always `pdPASS` | a binary semaphore signal |
-| `eSetBits` | `value \|= ulValue` (OR-in bits) | always `pdPASS` | lightweight event group |
-| `eIncrement` | `value += 1` (`ulValue` ignored) | always `pdPASS` | counting semaphore |
-| `eSetValueWithOverwrite` | `value = ulValue` (always) | always `pdPASS` | mailbox (latest wins) |
-| `eSetValueWithoutOverwrite` | `value = ulValue` **only if no pending notification** | `pdFAIL` if one was already pending | mailbox that refuses to clobber unread data |
-
-```c
-// Send a status word to a worker, overwriting any stale one:
-xTaskNotify(hWorker, STATUS_ERROR, eSetValueWithOverwrite);
-
-// OR-in event flags without losing previously set ones:
-xTaskNotify(hWorker, EVT_RX_DONE, eSetBits);
-```
-
----
-
-### Waiting: `xTaskNotifyWait()` bit-clear semantics
-
-```c
-uint32_t notifiedValue;
-xTaskNotifyWait(
-    0x00,              // ulBitsToClearOnEntry: clear these bits BEFORE waiting (0 = keep)
-    0xFFFFFFFF,        // ulBitsToClearOnExit:  clear these bits AFTER receiving (all = reset)
-    &notifiedValue,    // receives the value at the moment of unblocking
-    portMAX_DELAY);
-if (notifiedValue & EVT_RX_DONE) { /* ... */ }
-```
-
-- **ClearOnEntry** lets you discard leftover bits so you only react to *new* ones.
-- **ClearOnExit = 0xFFFFFFFF** resets the value to 0 after reading — "consume" semantics.
-
----
-
-### Notification management & indexed notifications
-
-```c
-// Clear a pending notification state (undo a give that hasn't been taken)
-BaseType_t xTaskNotifyStateClear(TaskHandle_t xTask);
-
-// Clear specific bits of the notification value without waiting
-uint32_t   ulTaskNotifyValueClear(TaskHandle_t xTask, uint32_t ulBitsToClear);
-```
-
-**Indexed notifications** (FreeRTOS v10.4+, `configTASK_NOTIFICATION_ARRAY_ENTRIES > 1`): each
-task has an **array** of notifications so different senders can target different "channels"
-without interfering. Every classic call maps to an `...Indexed` form:
-
-```c
-xTaskNotifyGiveIndexed(handle, uxIndex);
-ulTaskNotifyTakeIndexed(uxIndex, xClearOnExit, xTicksToWait);
-xTaskNotifyIndexed(handle, uxIndex, value, action);
-xTaskNotifyWaitIndexed(uxIndex, clearEntry, clearExit, &value, xTicksToWait);
-// The non-indexed calls are just index 0.
-```
-
-**Why:** lets one driver use index 0 for "transfer complete" while another subsystem uses
-index 1 for "abort", on the same task, with zero cross-talk.
-
-**Big limitation (know for interviews):** a task notification goes to **exactly one known
-task**. It cannot be given to a semaphore/queue, cannot be waited on by multiple tasks, and
-(mostly) cannot be used as a broadcast. When you need many waiters or many senders, use a
-semaphore, queue, or event group.
-
----
-
-## 8. Event Groups / Event Bits
-
-### Purpose
-Wait for MULTIPLE events simultaneously. Single task can block until ANY or ALL of several events occur. Up to 24 usable bits per event group.
-
----
-
-### `xEventGroupCreate()`
-
-```c
-EventGroupHandle_t xEventGroupCreate(void);
-```
-
----
-
-### `xEventGroupSetBits()`
-
-```c
-EventBits_t xEventGroupSetBits(
-    EventGroupHandle_t xEventGroup,
-    EventBits_t        uxBitsToSet    // Bitmask — set these bits
-);
-
-// FromISR version
-BaseType_t xEventGroupSetBitsFromISR(
-    EventGroupHandle_t xEventGroup,
-    EventBits_t        uxBitsToSet,
-    BaseType_t*        pxHigherPriorityTaskWoken
-);
-```
-
----
-
-### `xEventGroupWaitBits()`
-
-```c
-EventBits_t xEventGroupWaitBits(
-    EventGroupHandle_t xEventGroup,
-    EventBits_t        uxBitsToWaitFor,  // Which bits to watch
-    BaseType_t         xClearOnExit,     // pdTRUE = clear bits when condition met
-    BaseType_t         xWaitForAllBits,  // pdTRUE = wait for ALL bits (AND)
-                                          // pdFALSE = wait for ANY bit (OR)
-    TickType_t         xTicksToWait
-);
-// Returns: bit pattern at time of return
-```
-
-**Real use case:**
-```c
-#define SENSOR_READY_BIT    (1 << 0)
-#define GPS_READY_BIT       (1 << 1)
-#define NETWORK_READY_BIT   (1 << 2)
-
-EventGroupHandle_t xInitGroup = xEventGroupCreate();
-
-// System init task — wait for ALL subsystems ready
-xEventGroupWaitBits(
-    xInitGroup,
-    SENSOR_READY_BIT | GPS_READY_BIT | NETWORK_READY_BIT,
-    pdTRUE,   // clear bits after
-    pdTRUE,   // wait for ALL (AND)
-    portMAX_DELAY
-);
-startMainApplication();
-```
-
----
-
-### `xEventGroupClearBits()` / `xEventGroupGetBits()`
-
-```c
-EventBits_t xEventGroupClearBits(EventGroupHandle_t xEventGroup, EventBits_t uxBitsToClear);
-EventBits_t xEventGroupGetBits(EventGroupHandle_t xEventGroup); // Read without waiting
-EventBits_t xEventGroupGetBitsFromISR(EventGroupHandle_t xEventGroup);
-void        vEventGroupDelete(EventGroupHandle_t xEventGroup);
-```
-
----
-
-### `xEventGroupSync()` — task rendezvous / barrier
-
-```c
-EventBits_t xEventGroupSync(
-    EventGroupHandle_t xEventGroup,
-    EventBits_t        uxBitsToSet,       // bits THIS task sets to say "I've arrived"
-    EventBits_t        uxBitsToWaitFor,   // wait until all these are set (everyone arrived)
-    TickType_t         xTicksToWait
-);
-```
-
-**Use when:** several tasks must all reach a sync point before any proceeds (a barrier).
-Atomically sets this task's bit and waits for the others — impossible to race with separate
-Set + Wait calls.
-
-```c
-#define TASK_A_BIT (1<<0)
-#define TASK_B_BIT (1<<1)
-#define TASK_C_BIT (1<<2)
-#define ALL_SYNC   (TASK_A_BIT | TASK_B_BIT | TASK_C_BIT)
-
-// each task, at the barrier:
-xEventGroupSync(xBarrier, TASK_A_BIT, ALL_SYNC, portMAX_DELAY);
-// all three continue together from here
-```
-
----
-
-### Event Group vs Task Notification
-
-| | Event Group | Task Notification |
-|---|---|---|
-| Multiple events AND/OR | YES | Limited — only one 32-bit value |
-| Multiple tasks waiting | YES — all unblocked when bits set | NO — one target task only |
-| Bits persist until cleared | YES | Cleared on take |
-| Use case | Synchronize multiple subsystems | Fast single task signaling |
-
----
-
-## 9. Software Timers
-
-### Purpose
-Execute callback function after a delay or periodically — without dedicating a task. Timer callbacks run in Timer Service Task context.
-
----
-
-### `xTimerCreate()`
-
-```c
-TimerHandle_t xTimerCreate(
-    const char*     pcTimerName,      // Debug name
-    TickType_t      xTimerPeriod,     // Period in ticks
-    UBaseType_t     uxAutoReload,     // pdTRUE = repeating, pdFALSE = one-shot
-    void*           pvTimerID,        // ID passed to callback — use to identify timer
-    TimerCallbackFunction_t pxCallbackFunction  // void callback(TimerHandle_t xTimer)
-);
-```
-
----
-
-### Timer Control APIs
-
-```c
-BaseType_t xTimerStart(TimerHandle_t xTimer, TickType_t xTicksToWait);
-BaseType_t xTimerStop(TimerHandle_t xTimer, TickType_t xTicksToWait);
-BaseType_t xTimerReset(TimerHandle_t xTimer, TickType_t xTicksToWait);  // Restart period from now
-BaseType_t xTimerChangePeriod(TimerHandle_t xTimer, TickType_t xNewPeriod, TickType_t xTicksToWait);
-void* pvTimerGetTimerID(TimerHandle_t xTimer);  // Get ID inside callback
-```
-
-**One-shot vs Auto-reload:**
-```c
-// One-shot — fires once, stops
-TimerHandle_t xTimeout = xTimerCreate("timeout", pdMS_TO_TICKS(5000), pdFALSE, 0, timeoutCallback);
-
-// Auto-reload — fires repeatedly every period
-TimerHandle_t xHeartbeat = xTimerCreate("heartbeat", pdMS_TO_TICKS(1000), pdTRUE, 0, heartbeatCallback);
-```
-
-**Critical rule:** Timer callbacks MUST NOT block. They run in Timer Service Task — blocking starves all other timer callbacks.
-
-**Alternate:** Dedicated task with `vTaskDelayUntil()` — more flexible, can block, has own stack.
-
----
-
-### The Timer Service (Daemon) Task
-
-Software timers do **not** each get a task. One shared **timer daemon task** runs all
-callbacks. It is created by `vTaskStartScheduler()` when `configUSE_TIMERS = 1`. Three config
-values govern it:
-
-| Config | Meaning |
+| Flag | Meaning |
 |---|---|
-| `configTIMER_TASK_PRIORITY` | Priority of the daemon — set high so timers fire promptly |
-| `configTIMER_QUEUE_LENGTH` | Depth of the command queue (`xTimerStart`/`Stop`/… are queued to the daemon) |
-| `configTIMER_TASK_STACK_DEPTH` | Daemon stack — your callbacks run on it, so size for them |
+| `configTICK_RATE_HZ` | Number of kernel ticks each second |
+| `configMAX_PRIORITIES` | Valid priorities 0 to N-1 |
+| `configUSE_PREEMPTION` | Enable preemptive scheduling |
+| `configUSE_TIME_SLICING` | Equal-priority time slicing where supported |
+| `configUSE_MUTEXES` / `configUSE_RECURSIVE_MUTEXES` | Mutex feature |
+| `configUSE_COUNTING_SEMAPHORES` | Counting semaphores |
+| `configUSE_TASK_NOTIFICATIONS` | Direct task notifications |
+| `configTASK_NOTIFICATION_ARRAY_ENTRIES` | Per-task notification slots |
+| `configUSE_TIMERS` | Software timer service |
+| `configTIMER_TASK_PRIORITY` | Timer service task priority |
+| `configTIMER_QUEUE_LENGTH` | Timer command queue capacity |
+| `configCHECK_FOR_STACK_OVERFLOW` | Stack protection checking |
+| `configSUPPORT_STATIC_ALLOCATION` | Static create APIs |
+| `configSUPPORT_DYNAMIC_ALLOCATION` | Dynamic create APIs |
+| `configUSE_TICKLESS_IDLE` | Tickless idle feature (port-dependent) |
+| `configMAX_SYSCALL_INTERRUPT_PRIORITY` | Cortex-M interrupt priority boundary for FreeRTOS API calls |
 
-**Consequence:** `xTimerStart` etc. don't act immediately — they **send a command** to the
-daemon's queue. The `xTicksToWait` argument is how long to block if that command queue is
-full, *not* the timer period.
-
----
-
-### Timer Query & FromISR APIs
-
-```c
-BaseType_t   xTimerIsTimerActive(TimerHandle_t xTimer);        // pdTRUE if running
-TickType_t   xTimerGetPeriod(TimerHandle_t xTimer);
-TickType_t   xTimerGetExpiryTime(TimerHandle_t xTimer);        // tick at which it next fires
-const char*  pcTimerGetName(TimerHandle_t xTimer);
-void         vTimerSetTimerID(TimerHandle_t xTimer, void* pvNewID);
-BaseType_t   xTimerDelete(TimerHandle_t xTimer, TickType_t xTicksToWait);
-
-// ISR-safe control — all take pxHigherPriorityTaskWoken and need portYIELD_FROM_ISR after
-BaseType_t xTimerStartFromISR(TimerHandle_t xTimer, BaseType_t* pxHigherPriorityTaskWoken);
-BaseType_t xTimerStopFromISR(TimerHandle_t xTimer, BaseType_t* pxHigherPriorityTaskWoken);
-BaseType_t xTimerResetFromISR(TimerHandle_t xTimer, BaseType_t* pxHigherPriorityTaskWoken);
-BaseType_t xTimerChangePeriodFromISR(TimerHandle_t xTimer, TickType_t xNewPeriod, BaseType_t* pxHigherPriorityTaskWoken);
-```
+### First five checks when firmware hangs
+1. High-priority task infinite busy-loop? Other tasks **starvation**.
+2. Waiting on full/empty queue? **Timeout + return code** logged?
+3. Mutex lock taken but not released? **Deadlock / priority inversion**.
+4. Stack watermark low? **Stack overflow / large local memory**.
+5. ISR priority invalid or wrong ISR API? `configASSERT` / crash.
 
 ---
 
-### `xTimerPendFunctionCall()` — Centralized Deferred Interrupt Processing
+## 13. Quick decision matrix
 
-```c
-// From a task
-BaseType_t xTimerPendFunctionCall(
-    PendedFunction_t xFunctionToPend,   // void fn(void* pvParam1, uint32_t ulParam2)
-    void*            pvParameter1,
-    uint32_t         ulParameter2,
-    TickType_t       xTicksToWait
-);
-
-// From an ISR — run heavy/API-heavy work in the daemon task instead of the ISR
-BaseType_t xTimerPendFunctionCallFromISR(
-    PendedFunction_t xFunctionToPend,
-    void*            pvParameter1,
-    uint32_t         ulParameter2,
-    BaseType_t*      pxHigherPriorityTaskWoken
-);
-```
-
-**Why it matters (asked in interviews):** this is the cleanest **"deferred interrupt
-processing"** mechanism. The ISR stays tiny — it just queues a function pointer + args to the
-timer daemon, which then runs your handler in **task context** where you may call any
-(non-FromISR) FreeRTOS API, allocate memory, log, etc. No dedicated task, no semaphore needed.
-
-```c
-void deferred_work(void *p1, uint32_t p2) {   // runs in daemon task, task context
-    process_packet((packet_t *)p1, p2);
-}
-
-void IRAM_ATTR uart_isr(void) {
-    BaseType_t woken = pdFALSE;
-    xTimerPendFunctionCallFromISR(deferred_work, pkt, len, &woken);
-    portYIELD_FROM_ISR(woken);
-}
-```
-
----
-
-## 10. Stream Buffer
-
-### Purpose
-Pass continuous byte stream between ONE sender and ONE receiver. Optimized for variable-length data like serial/audio streams. Single producer, single consumer ONLY.
-
----
-
-### `xStreamBufferCreate()`
-
-```c
-StreamBufferHandle_t xStreamBufferCreate(
-    size_t xBufferSizeBytes,     // Total buffer size in bytes
-    size_t xTriggerLevelBytes    // Minimum bytes before receiver unblocks
-);
-```
-
----
-
-### Stream Buffer APIs
-
-```c
-size_t xStreamBufferSend(
-    StreamBufferHandle_t xStreamBuffer,
-    const void*          pvTxData,
-    size_t               xDataLengthBytes,
-    TickType_t           xTicksToWait
-);
-
-size_t xStreamBufferReceive(
-    StreamBufferHandle_t xStreamBuffer,
-    void*                pvRxData,
-    size_t               xBufferLengthBytes,
-    TickType_t           xTicksToWait
-);
-
-// FromISR variants — the classic "UART RX ISR fills, task drains" pattern
-size_t xStreamBufferSendFromISR(StreamBufferHandle_t xSB, const void* pvTx, size_t xLen, BaseType_t* pxWoken);
-size_t xStreamBufferReceiveFromISR(StreamBufferHandle_t xSB, void* pvRx, size_t xLen, BaseType_t* pxWoken);
-
-// Utility / status
-size_t     xStreamBufferBytesAvailable(StreamBufferHandle_t xSB);
-size_t     xStreamBufferSpacesAvailable(StreamBufferHandle_t xSB);
-BaseType_t xStreamBufferIsEmpty(StreamBufferHandle_t xSB);
-BaseType_t xStreamBufferIsFull(StreamBufferHandle_t xSB);
-BaseType_t xStreamBufferReset(StreamBufferHandle_t xSB);        // only when no task is blocked on it
-BaseType_t xStreamBufferSetTriggerLevel(StreamBufferHandle_t xSB, size_t xTriggerLevelBytes);
-void       vStreamBufferDelete(StreamBufferHandle_t xSB);
-```
-
-**Trigger level explained:** `xStreamBufferReceive` unblocks when **either** `xTriggerLevelBytes`
-have arrived **or** the timeout expires — whichever comes first. Set it to 1 for lowest
-latency, higher to batch and reduce wake-ups.
-
-**Return value:** send/receive return the **number of bytes actually transferred**, which may
-be *less* than requested on timeout — always use the return value, not the requested length.
-
-**Complete UART RX example:**
-```c
-StreamBufferHandle_t xUartRx;   // created with xStreamBufferCreate(256, 1)
-
-void IRAM_ATTR uart_rx_isr(void) {
-    uint8_t b = UART_DR;
-    BaseType_t woken = pdFALSE;
-    xStreamBufferSendFromISR(xUartRx, &b, 1, &woken);
-    portYIELD_FROM_ISR(woken);
-}
-
-void vUartTask(void *pv) {
-    uint8_t buf[64];
-    for (;;) {
-        size_t n = xStreamBufferReceive(xUartRx, buf, sizeof(buf), pdMS_TO_TICKS(20));
-        if (n) parse(buf, n);
-    }
-}
-```
-
-**Stream Buffer vs Queue:**
-
-| | Stream Buffer | Queue |
+| Situation | Preferred tool | Why not alternative? |
 |---|---|---|
-| Data type | Raw bytes — variable length | Fixed size items |
-| Multiple senders | NO — one sender only | YES |
-| Overhead | Lower | Higher |
-| Use case | UART receive, audio, serial | Structured messages between tasks |
+| Task A sends struct to Task B | Queue | Semaphore payload store nahi karta |
+| ISR wakes a single known task | Direct notification | Less overhead than semaphore |
+| Need count of N events | Counting notification or counting semaphore | Binary semaphore coalesces repeated signals |
+| Two tasks access same I2C/SPI | Mutex | Binary semaphore lacks owner/inheritance |
+| Need short atomic shared update | Atomic/critical section | Long mutex scope avoid, ISR interactions controlled |
+| Ready when Wi-Fi & sensor & storage | Event group AND | Counting semaphore identity lose karta |
+| Multiple flags OR | Event group OR | Single notification bits alternative if one receiver |
+| Continuous UART bytes | Stream buffer | Queue each byte more overhead, no framing |
+| Variable length whole messages | Message buffer | Stream buffer preserves no frame boundaries |
+| Latest sensor value only | Length-one overwrite queue | Regular queue stores stale backlog |
+| 100ms stable periodic loop | DelayUntil | `vTaskDelay` processing time accumulate karta |
+| Short delayed callback | Software timer | New task for every small timer wastes RAM |
+| Several input queues one waiter | Queue set / tagged common queue | Polling wastes CPU |
+| Very short ISR | FromISR notify/queue | No blocking or heavy processing in ISR |
+| Multiple identical resource slots | Counting semaphore + actual resource tracker | Mutex only single owner lock |
+| Never allocate dynamically at runtime | Static creation | Avoid runtime heap failure/fragmentation |
 
 ---
 
-## 11. Message Buffer
+## 14. Rapid-fire interview & counter-questions
 
-### Purpose
-Pass discrete variable-length messages between ONE sender and ONE receiver. Each send/receive is one complete message with length header.
+1. **Task create successful but task never prints?** Scheduler started? High-priority busy-loop? Task blocked/suspended? Stack? ESP-IDF `app_main` environment different from vanilla `vTaskStartScheduler`.
+2. **Does `vTaskDelay(500)` mean 500ms?** No, 500 *ticks*; conversion depends on rate.
+3. **Who makes a task Blocked?** Blocking API with resource unavailable + positive wait, or `vTaskDelay`. Queue-full error with wait 0 does NOT.
+4. **Queue full and producer highest priority?** With zero-wait busy-spin and lower-priority consumer, **starvation** keeps queue full.
+5. **What does `xQueueSend` actually copy?** Exactly `uxItemSize` bytes from pointed object at call; nested pointed-to data not deep-copied.
+6. **Why mutex instead of binary semaphore?** Ownership and priority inheritance to protect shared resource.
+7. **Can ISR use mutex?** No; ISR sends event to task using FromISR API.
+8. **Binary semaphore vs counting?** Binary stores 0/1 token; counting stores bounded event/resource count.
+9. **Notification vs queue?** Notifications target one task and limited 32-bit state; queues carry multiple independent payload items.
+10. **`pdTRUE` vs `pdFALSE` in `ulTaskNotifyTake`?** Clear all on exit vs decrement by one.
+11. **Task B unblocked in ISR, will it wait for tick?** Not if eligible for preemption and ISR issues appropriate yield on exit.
+12. **DelayUntil is hard deadline guarantee?** No; scheduled wake and actual CPU execution differ under overruns/preemption.
+13. **What's a port?** CPU/architecture + compiler + interrupt/context-switch implementation that adapts kernel to hardware.
+14. **Task yield vs block?** Yield remains Ready; block becomes not runnable until condition/time.
+15. **ESP-IDF stack 2048 means?** IDF stack bytes, vanilla standard words.
+16. **Shared int ++ atomic?** Usually read-modify-write; need atomic/critical section or mutex; multi-core memory ordering matters.
+17. **Can timer callback wait on queue indefinitely?** Avoid; timer service shared, stops other callbacks.
+18. **`portMAX_DELAY` magic infinite always?** Configuration-dependent, plus task/notification conditions.
+19. **Event group used for counting repeated interrupts?** No; repeated set bit collapses; notification counter / semaphore better.
+20. **Deadlock fixes?** Consistent lock order, short scope, bounded timeout, avoid nested locks.
+21. **Stack vs heap?** Stack per task call frames; heap for dynamic task/queue objects.
+22. **Why idle task should run?** Deleted-task cleanup and idle processing; CPU-heavy tasks should block.
 
----
-
-### `xMessageBufferCreate()`
-
-```c
-MessageBufferHandle_t xMessageBufferCreate(size_t xBufferSizeBytes);
-```
-
-```c
-size_t xMessageBufferSend(
-    MessageBufferHandle_t xMessageBuffer,
-    const void*           pvTxData,
-    size_t                xDataLengthBytes,
-    TickType_t            xTicksToWait
-);
-
-size_t xMessageBufferReceive(
-    MessageBufferHandle_t xMessageBuffer,
-    void*                 pvRxData,
-    size_t                xBufferLengthBytes,
-    TickType_t            xTicksToWait
-);
-
-// FromISR variants + status
-size_t xMessageBufferSendFromISR(MessageBufferHandle_t xMB, const void* pvTx, size_t xLen, BaseType_t* pxWoken);
-size_t xMessageBufferReceiveFromISR(MessageBufferHandle_t xMB, void* pvRx, size_t xLen, BaseType_t* pxWoken);
-size_t     xMessageBufferSpacesAvailable(MessageBufferHandle_t xMB);
-BaseType_t xMessageBufferIsEmpty(MessageBufferHandle_t xMB);
-BaseType_t xMessageBufferIsFull(MessageBufferHandle_t xMB);
-BaseType_t xMessageBufferReset(MessageBufferHandle_t xMB);
-void       vMessageBufferDelete(MessageBufferHandle_t xMB);
-```
-
-**Storage overhead:** each message is stored with a small **length header** (`size_t`, usually
-4 bytes). A buffer of N bytes therefore holds *less* than N bytes of payload. Size the buffer
-as `(max_msg_len + sizeof(size_t)) * expected_count`.
-
-**Send returns 0** if the message (plus its header) doesn't fit before the timeout — the
-message is **all-or-nothing**, never partially written. **Receive returns 0** if your
-`xBufferLengthBytes` is smaller than the next message (the message stays in the buffer).
-
-**Message Buffer vs Stream Buffer:**
-
-| | Stream Buffer | Message Buffer |
-|---|---|---|
-| Message boundaries | NO — continuous byte stream | YES — each receive gets one complete message |
-| Use case | Audio, raw serial | JSON packets, protocol frames |
+**Practice method:** Har API ke liye 5 cheeze bolo: "Why", "parameters", "Blocked kab", "error/timeout", "alternative kab better". Then [scenario workbook](./FREE_RTOS_SCENARIOS.md) solve karo.
 
 ---
 
-## 12. Memory Management
+## 15. Official references
+- [FreeRTOS API reference](https://freertos.org/Documentation/02-Kernel/04-API-references/)
+- [FreeRTOS task scheduling](https://freertos.org/Documentation/02-Kernel/02-Kernel-features/01-Tasks-and-co-routines/04-Task-scheduling)
+- [ESP-IDF FreeRTOS overview](https://docs.espressif.com/projects/esp-idf/en/v5.3/esp32/api-reference/system/freertos_idf.html)
 
-### Purpose
-Heap allocation for dynamic FreeRTOS objects.
-
----
-
-### Heap Schemes — Choose One
-
-| Scheme | Algorithm | Fragmentation | Free | Use When |
-|---|---|---|---|---|
-| heap_1 | Simple — no free | None | NO | Allocate at startup only |
-| heap_2 | Best fit | YES | YES | Fixed size allocations |
-| heap_3 | Wraps malloc/free | Depends on libc | YES | Already using malloc |
-| heap_4 | First fit, coalesces adjacent | Minimal | YES | **Most common — general use** |
-| heap_5 | heap_4 across multiple RAM regions | Minimal | YES | Multiple RAM banks (STM32H7) |
+> Practical note: code snippets API behavior samjhane ke liye hain. Integration mein headers, task stack, GPIO/driver setup, error cleanup, config flags, and port-specific ISR declaration add karna hoga.
 
 ---
 
-### Heap APIs
-
-```c
-void* pvPortMalloc(size_t xWantedSize);    // FreeRTOS heap allocation
-void  vPortFree(void* pv);                  // FreeRTOS heap free
-
-// Heap stats
-size_t xPortGetFreeHeapSize(void);          // Current free heap bytes
-size_t xPortGetMinimumEverFreeHeapSize();   // Minimum ever — use to size heap
-```
-
-**Production rule:** Allocate all objects at startup. Never call `pvPortMalloc()` in runtime task loops — fragmentation risk.
-
-Total heap size is set by `configTOTAL_HEAP_SIZE` in `FreeRTOSConfig.h`. Right-size it by
-running the app under load and reading `xPortGetMinimumEverFreeHeapSize()` — leave headroom.
-
----
-
-### Malloc-Failed Hook
-
-```c
-// Enable with configUSE_MALLOC_FAILED_HOOK = 1. Called whenever pvPortMalloc returns NULL.
-void vApplicationMallocFailedHook(void) {
-    // Log free-heap stats, blink an error code, then reset — do NOT silently continue.
-    configASSERT(0);
-}
-```
-
----
-
-### Static Allocation Callbacks (required when `configSUPPORT_STATIC_ALLOCATION = 1`)
-
-If you use static allocation, the kernel needs RAM for the **idle task** (and the **timer
-task** if `configUSE_TIMERS = 1`) but cannot malloc it — so **you must provide** these
-callbacks, or the link fails / the scheduler won't start:
-
-```c
-void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer,
-                                   StackType_t  **ppxIdleTaskStackBuffer,
-                                   uint32_t      *pulIdleTaskStackSize) {
-    static StaticTask_t xIdleTCB;
-    static StackType_t  xIdleStack[configMINIMAL_STACK_SIZE];
-    *ppxIdleTaskTCBBuffer   = &xIdleTCB;
-    *ppxIdleTaskStackBuffer = xIdleStack;
-    *pulIdleTaskStackSize   = configMINIMAL_STACK_SIZE;
-}
-
-void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer,
-                                    StackType_t  **ppxTimerTaskStackBuffer,
-                                    uint32_t      *pulTimerTaskStackSize) {
-    static StaticTask_t xTimerTCB;
-    static StackType_t  xTimerStack[configTIMER_TASK_STACK_DEPTH];
-    *ppxTimerTaskTCBBuffer   = &xTimerTCB;
-    *ppxTimerTaskStackBuffer = xTimerStack;
-    *pulTimerTaskStackSize   = configTIMER_TASK_STACK_DEPTH;
-}
-```
-
----
-
-## 13. Critical Sections and Interrupt Control
-
-### Purpose
-Protect very short sequences that must not be interrupted. Disables interrupts — use minimally.
-
----
-
-```c
-// Task context — disables ALL interrupts up to configMAX_SYSCALL_INTERRUPT_PRIORITY
-taskENTER_CRITICAL();
-// VERY SHORT code here — never block, never call FreeRTOS blocking API
-taskEXIT_CRITICAL();
-
-// ISR context
-taskENTER_CRITICAL_FROM_ISR();
-taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
-
-// Suspend scheduler without disabling interrupts
-// Interrupts still fire but no context switch occurs
-vTaskSuspendAll();
-xTaskResumeAll();
-```
-
-**Critical Section vs Mutex:**
-
-| | Critical Section | Mutex |
-|---|---|---|
-| Disables interrupts | YES | NO |
-| Other tasks blocked | YES | Only tasks wanting same mutex |
-| Duration | Microseconds max | Can be longer |
-| Use case | Hardware register access, flag flip | Shared peripheral, data structure |
-
-**Nesting:** `taskENTER_CRITICAL()` / `taskEXIT_CRITICAL()` may be nested — interrupts are only
-re-enabled when the outermost pair exits. The FromISR pair returns/consumes a saved status so
-it nests safely across ISRs:
-
-```c
-UBaseType_t s = taskENTER_CRITICAL_FROM_ISR();
-// touch shared data
-taskEXIT_CRITICAL_FROM_ISR(s);
-```
-
----
-
-## 13b. Hook Functions (Callbacks)
-
-### Purpose
-User-supplied callbacks the kernel invokes at defined moments. Each is gated by a config
-macro. Keep them short and non-blocking.
-
-| Hook | Enable macro | Context | Use for |
-|---|---|---|---|
-| `vApplicationIdleHook()` | `configUSE_IDLE_HOOK` | Idle task | low-power `WFI`, cheap background work — **must not block** |
-| `vApplicationTickHook()` | `configUSE_TICK_HOOK` | Tick ISR | tiny periodic bookkeeping — **FromISR APIs only, must be fast** |
-| `vApplicationMallocFailedHook()` | `configUSE_MALLOC_FAILED_HOOK` | caller of malloc | catch out-of-heap |
-| `vApplicationStackOverflowHook()` | `configCHECK_FOR_STACK_OVERFLOW` | context switch | catch stack overflow |
-| `vApplicationDaemonTaskStartupHook()` | `configUSE_DAEMON_TASK_STARTUP_HOOK` | timer daemon task | one-time init that must run in a task after the scheduler starts |
-| `vApplicationGetIdleTaskMemory()` | `configSUPPORT_STATIC_ALLOCATION` | startup | supply idle-task RAM |
-| `vApplicationGetTimerTaskMemory()` | static + `configUSE_TIMERS` | startup | supply timer-task RAM |
-
-```c
-void vApplicationIdleHook(void) {
-    __WFI();   // sleep the core until the next interrupt — cheap power win
-}
+## Appendix A. Parameter-by-parameter API desk reference
 
-void vApplicationTickHook(void) {
-    // runs every tick, in interrupt context — keep it to a few instructions
-}
-```
+Each entry answers: **har parameter kyun diya?**, **return kya?**, **common mistake kya?** Core working explanations above; yahan interview ke samay quick lookup.
 
----
+### A1. `xQueueCreate(uxQueueLength, uxItemSize)`
 
-## 13c. FreeRTOSConfig.h Reference
+**Parameters:**
+1. uxQueueLength: max number of elements stored; full condition isi se aati hai.
+2. uxItemSize: bytes copied per item; use sizeof(Type), pointer queue mein sizeof(Type*).
 
-The single most important file — it tailors the kernel to your app. Key macros grouped:
+**Return:** QueueHandle_t or NULL. **Practical trap / why:** Burst buffered copies; don't assume external data deep-copied.
 
-### Scheduling
-| Macro | Typical | Meaning |
-|---|---|---|
-| `configUSE_PREEMPTION` | 1 | 1 = preemptive, 0 = cooperative (yield-only) |
-| `configUSE_TIME_SLICING` | 1 | round-robin among equal-priority Ready tasks |
-| `configMAX_PRIORITIES` | 5–32 | number of priority levels (0..N-1). RAM cost per level |
-| `configTICK_RATE_HZ` | 1000 | tick frequency; `pdMS_TO_TICKS` uses it |
-| `configUSE_16_BIT_TICKS` | 0 | 0 → 32-bit `TickType_t` (longer max delay) |
-| `configIDLE_SHOULD_YIELD` | 1 | idle yields to equal-prio (=0) app tasks promptly |
+### A2. `xQueueSend(xQueue, pvItemToQueue, xTicksToWait)`
 
-### Memory
-| Macro | Meaning |
-|---|---|
-| `configSUPPORT_DYNAMIC_ALLOCATION` | enable `xTaskCreate` etc. |
-| `configSUPPORT_STATIC_ALLOCATION` | enable `...Static` creators |
-| `configTOTAL_HEAP_SIZE` | heap bytes for heap_1/2/4 |
-| `configMINIMAL_STACK_SIZE` | idle-task stack (words); baseline for your own |
+**Parameters:**
+1. xQueue: valid queue handle.
+2. pvItemToQueue: existing source item's address; content copied.
+3. xTicksToWait: max ticks to block IF queue full; 0 no wait.
 
-### Features (compile OUT what you don't use to save flash/RAM)
-| Macro | Enables |
-|---|---|
-| `configUSE_MUTEXES` | mutexes + priority inheritance |
-| `configUSE_RECURSIVE_MUTEXES` | recursive mutexes |
-| `configUSE_COUNTING_SEMAPHORES` | counting semaphores |
-| `configUSE_TIMERS` | software timers + daemon task |
-| `configUSE_QUEUE_SETS` | queue sets |
-| `configUSE_TASK_NOTIFICATIONS` | task notifications (on by default) |
-| `configTASK_NOTIFICATION_ARRAY_ENTRIES` | number of indexed notifications per task |
-| `INCLUDE_vTaskDelete`, `INCLUDE_vTaskSuspend`, `INCLUDE_xTaskGetSchedulerState`, … | pull in individual optional APIs |
-
-### Interrupts (Cortex-M — get these wrong and you hard-fault)
-| Macro | Meaning |
-|---|---|
-| `configPRIO_BITS` | priority bits implemented by your MCU (e.g. 4 on many STM32) |
-| `configKERNEL_INTERRUPT_PRIORITY` | priority of the tick/PendSV (lowest) |
-| `configMAX_SYSCALL_INTERRUPT_PRIORITY` | **highest** priority from which `...FromISR` APIs may be called — see §14 |
-
-### Debug / stats
-| Macro | Meaning |
-|---|---|
-| `configCHECK_FOR_STACK_OVERFLOW` | 0/1/2 — overflow detection method |
-| `configUSE_TRACE_FACILITY` | extra TCB fields for `vTaskList`, tracers |
-| `configGENERATE_RUN_TIME_STATS` | enable `vTaskGetRunTimeStats` |
-| `configASSERT(x)` | **define this** — catches kernel misuse early; disable in release |
+**Return:** pdPASS / errQUEUE_FULL (pdFAIL). **Practical trap / why:** ISR ke liye xQueueSendFromISR.
 
----
+### A3. `xQueueSendToFront(xQueue, pvItemToQueue, xTicksToWait)`
 
-## 14. Interview Topics to Know Cold
+**Parameters:**
+1. xQueue: queue handle.
+2. pvItemToQueue: source item address.
+3. xTicksToWait: full hone par wait limit.
 
-### FromISR Rule — Always Asked
+**Return:** pdPASS / failure. **Practical trap / why:** Urgent message ko front push; repeated use starvation of ordinary queued work.
 
-Any FreeRTOS API called from Interrupt Service Routine context MUST use the `FromISR` version. Standard APIs can block — illegal in ISR. FromISR APIs never block.
+### A4. `xQueueReceive(xQueue, pvBuffer, xTicksToWait)`
 
-```c
-// Task context          ISR context
-xQueueSend()       →    xQueueSendFromISR()
-xSemaphoreGive()   →    xSemaphoreGiveFromISR()
-xTaskNotifyGive()  →    vTaskNotifyGiveFromISR()
-xEventGroupSetBits() →  xEventGroupSetBitsFromISR()
-```
-
-Always follow with `portYIELD_FROM_ISR(pxHigherPriorityTaskWoken)`.
-
----
+**Parameters:**
+1. xQueue: queue handle.
+2. pvBuffer: allocated writable output address (at least item size).
+3. xTicksToWait: empty queue par max block time.
 
-### vTaskDelay() vs vTaskDelayUntil() — Always Asked
+**Return:** pdPASS / errQUEUE_EMPTY (pdFAIL). **Practical trap / why:** Success par first item removes; producer queue space pa sakta hai.
 
-```c
-// vTaskDelay — delay FROM NOW — period drifts
-// Period = execution time + delay time
-
-// vTaskDelayUntil — delay UNTIL absolute tick — period fixed
-// Period = constant regardless of execution time
-// Use for: motor control, sensor sampling, anything needing fixed frequency
-```
-
----
-
-### Priority Inversion — Always Asked
-
-Low priority task holds Mutex → High priority task blocks on Mutex → Medium priority task preempts low priority task → High priority task starved.
-
-**Fix:** Mutex with Priority Inheritance — FreeRTOS `xSemaphoreCreateMutex()` does this automatically. Low priority task priority raised to match highest waiter immediately on contention.
+### A5. `xQueuePeek(xQueue, pvBuffer, xTicksToWait)`
 
----
-
-### Deadlock Prevention — Always Asked
+**Parameters:**
+1. xQueue: queue handle.
+2. pvBuffer: result copy destination.
+3. xTicksToWait: empty par wait.
 
-Two techniques practical in embedded:
-
-1. **Lock ordering** — always acquire mutexes in same global order across all tasks.
-2. **Timeout with backoff** — use `xTicksToWait` instead of `portMAX_DELAY`, release and retry.
-
----
-
-### Stack Overflow Detection — Always Asked
-
-Enable in `FreeRTOSConfig.h`:
-
-```c
-#define configCHECK_FOR_STACK_OVERFLOW 1  // Stack pointer boundary check
-#define configCHECK_FOR_STACK_OVERFLOW 2  // Stack paint pattern (0xA5) check — more reliable
+**Return:** pdPASS / failure. **Practical trap / why:** Reads but doesn't remove; count unchanged.
 
-void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskName) {
-    // Log task name, halt system
-    configASSERT(0);
-}
-```
-
-**Method 1 vs Method 2:**
-- **Method 1** checks, at each context switch, whether the stack pointer is past the end of the
-  task's stack. Fast, but misses overflows that happened *and returned* between switches.
-- **Method 2** additionally checks that the last 16 bytes, pre-painted with `0xA5A5A5A5`, are
-  intact. Catches deeper/transient overflows Method 1 misses, at a small extra cost. **Prefer
-  Method 2** in development.
-
----
-
-### PendSV & Context Switch Internals (Cortex-M) — HIGH
-
-**What happens on a switch:**
-1. The CPU automatically stacks 8 registers on an exception entry (**R0–R3, R12, LR, PC, xPSR**) —
-   the "hardware-saved" frame.
-2. The FreeRTOS **PendSV handler** (`xPortPendSVHandler`) then manually saves the remaining
-   **R4–R11** onto the *current* task's stack, stores that task's stack pointer into its TCB,
-   calls `vTaskSwitchContext()` to pick the next task, loads the new task's SP, and restores
-   its R4–R11.
-3. On exception return, the hardware automatically restores R0–R3/R12/LR/PC/xPSR of the new
-   task — and execution resumes exactly where that task left off.
-
-**Why PendSV specifically:**
-- PendSV is set to the **lowest** interrupt priority, so it only runs after all other ISRs
-  finish — a context switch never preempts a real device ISR mid-flight.
-- The switch is *requested* (by setting the PendSV pending bit) from the tick ISR or from any
-  API that unblocks a higher-priority task; PendSV then performs it at a safe moment. This
-  cleanly decouples "decide to switch" from "perform the switch" and avoids re-entrancy.
-- SysTick drives the tick; `SVC` is used once to start the first task.
-
----
-
-### configMAX_SYSCALL_INTERRUPT_PRIORITY — HIGH
-
-Defines the **highest** interrupt priority from which it is legal to call `...FromISR` APIs.
-
-- ISRs at or **below** this priority (numerically ≥, since lower number = higher priority on
-  Cortex-M) may call FreeRTOS FromISR APIs. The kernel masks interrupts up to this level inside
-  critical sections (via `BASEPRI`), so those ISRs can be briefly deferred safely.
-- ISRs **above** it (higher priority, smaller number) must **never** call any FreeRTOS API — but
-  they enjoy zero kernel-induced latency (great for time-critical motor/PWM ISRs).
-
-**Cortex-M gotcha:** these macros are written in terms of the hardware priority register, which
-puts the priority in the **upper** `configPRIO_BITS`. So a "logical" priority 5 with 4 prio
-bits is written `5 << (8 - 4) = 0x50`. Getting the shift wrong is the #1 cause of the
-"works until an interrupt fires, then HardFault / `configASSERT` trips in `port.c`" bug.
-
-```c
-// Example for an MCU with 4 priority bits:
-#define configPRIO_BITS                          4
-#define configKERNEL_INTERRUPT_PRIORITY          (15 << 4)  // lowest — tick/PendSV
-#define configMAX_SYSCALL_INTERRUPT_PRIORITY     (5  << 4)  // FromISR allowed at prio 5..15
-```
-
----
-
-### Tickless Idle (Low Power) — MEDIUM
-
-When enabled (`configUSE_TICKLESS_IDLE = 1`), if the idle task sees that **all** tasks will be
-blocked for many ticks, it stops the periodic tick, puts the core into deep sleep for (nearly)
-that whole span, then on wake **corrects the tick count** by the elapsed time. Net effect: the
-MCU sleeps for long stretches instead of waking 1000×/s just to service empty ticks — critical
-for coin-cell IoT devices.
-
-- The kernel calls `portSUPPRESS_TICKS_AND_SLEEP(xExpectedIdleTime)`; ports override
-  `vPortSuppressTicksAndSleep` for their sleep mode.
-- On **ESP32**, "light sleep" retains RAM and resumes fast; "deep sleep" powers down and
-  effectively reboots — tickless idle maps to light sleep.
-- Tune `configEXPECTED_IDLE_TIME_BEFORE_SLEEP` (minimum idle ticks before it bothers sleeping).
-
----
-
-### Priority Ceiling (manual) — MEDIUM
-
-FreeRTOS mutexes implement **priority inheritance**, not **priority ceiling**. To emulate a
-ceiling protocol, raise a task to the resource's ceiling priority *before* taking it and
-restore afterward:
-
-```c
-UBaseType_t saved = uxTaskPriorityGet(NULL);
-vTaskPrioritySet(NULL, RESOURCE_CEILING_PRIO);   // climb to ceiling
-xSemaphoreTake(xMutex, portMAX_DELAY);
-// ... critical work ...
-xSemaphoreGive(xMutex);
-vTaskPrioritySet(NULL, saved);                   // restore
-```
-
-This bounds priority inversion to a single critical section and prevents deadlock among tasks
-that share the same ceiling — at the cost of manual bookkeeping.
-
----
-
-### Choosing the Right Primitive
-
-| Scenario | Use |
-|---|---|
-| ISR signals one known task | Task Notification (`vTaskNotifyGiveFromISR`) |
-| ISR signals multiple tasks | Binary Semaphore |
-| Pass data between tasks | Queue |
-| Share latest sensor value | Mailbox (`xQueueOverwrite` + `xQueuePeek`) |
-| Protect shared peripheral | Mutex |
-| Count available resources | Counting Semaphore |
-| Wait for multiple events AND/OR | Event Group |
-| Periodic callback, no dedicated task | Software Timer |
-| Raw byte stream (UART, audio) | Stream Buffer |
-| Variable length discrete messages | Message Buffer |
-| Zero RAM overhead signaling | Task Notification |
-
----
-
-## 15. Study Notes
-
-Topics originally identified as gaps — **now covered in §14** above. Use this as a checklist:
-
-| Topic | Priority | Covered in |
-|---|---|---|
-| PendSV interrupt — context switch internals | HIGH | §14 → *PendSV & Context Switch Internals* |
-| Tickless Idle — deep dive | MEDIUM | §14 → *Tickless Idle* |
-| Priority Ceiling — manual implementation | MEDIUM | §14 → *Priority Ceiling (manual)* |
-| Stack Overflow Detection Method 1 vs Method 2 | REVIEW | §14 → *Stack Overflow Detection* |
-| Task Notification — all eNotifyAction types | MEDIUM | §7 → *eNotifyAction — all five actions* |
-| `configMAX_SYSCALL_INTERRUPT_PRIORITY` | HIGH | §14 → *configMAX_SYSCALL_INTERRUPT_PRIORITY* |
-
-**Further self-test questions:**
-- Difference between binary semaphore, mutex, and a task notification used as a signal?
-- When does `xQueueSend` copy vs when should you queue a pointer?
-- Why must the idle task be allowed to run? What breaks if it can't?
-- What is priority inversion, and exactly how does inheritance fix it?
-- Why can't you call `xQueueSend` (non-ISR) from an ISR? What actually goes wrong?
-- Difference between suspending the scheduler and a critical section?
-- SMP (dual-core ESP32): what does `tskNO_AFFINITY` mean and when do you pin a task?
-
----
-
-## Appendix A — Data Types
-
-| Type | Meaning |
-|---|---|
-| `BaseType_t` | Most efficient int for the architecture (32-bit on Cortex-M, 8-bit on AVR). Used for booleans and small counts. |
-| `UBaseType_t` | Unsigned `BaseType_t`. Priorities, counts. |
-| `TickType_t` | Tick counter — 16- or 32-bit per `configUSE_16_BIT_TICKS`. |
-| `TaskHandle_t` | Opaque handle to a task. |
-| `QueueHandle_t` | Opaque handle to a queue. |
-| `SemaphoreHandle_t` | Opaque handle to any semaphore/mutex. |
-| `EventGroupHandle_t` | Opaque handle to an event group. |
-| `TimerHandle_t` | Opaque handle to a software timer. |
-| `StreamBufferHandle_t` / `MessageBufferHandle_t` | Opaque handles to stream/message buffers. |
-| `StackType_t` | Word type of a stack slot (`uint32_t` on Cortex-M). |
-| `StaticTask_t`, `StaticQueue_t`, … | Storage structs for static creation. |
-
-**Constants you'll use constantly:** `pdTRUE`(1), `pdFALSE`(0), `pdPASS`(1), `pdFAIL`(0),
-`portMAX_DELAY`, `tskIDLE_PRIORITY`(0), `configMINIMAL_STACK_SIZE`, `pdMS_TO_TICKS(ms)`,
-`portTICK_PERIOD_MS`, `tskNO_AFFINITY` (SMP).
-
----
-
-## Appendix B — Return Codes
-
-| Code | Value | Where |
-|---|---|---|
-| `pdPASS` / `pdTRUE` | 1 | success / true |
-| `pdFAIL` / `pdFALSE` | 0 | failure / false / timeout |
-| `errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY` | -1 | create-* out of heap |
-| `errQUEUE_FULL` | 0 | `xQueueSend` timed out (queue stayed full) |
-| `errQUEUE_EMPTY` | 0 | `xQueueReceive` timed out (queue stayed empty) |
-| `errQUEUE_BLOCKED` / `errQUEUE_YIELD` | internal | scheduler-internal, not user-facing |
-
-**Habit:** compare against the named constant (`== pdTRUE`), not against `0`/`1` literals.
-
----
-
-## Appendix C — Common Bugs & Gotchas
-
-| Symptom | Likely cause |
-|---|---|
-| HardFault the moment an interrupt fires | ISR priority above `configMAX_SYSCALL_INTERRUPT_PRIORITY`, or wrong priority-bit shift |
-| Task never runs | Higher-priority task never blocks (starvation); or you forgot `vTaskStartScheduler()` |
-| Deleted tasks leak RAM | Idle task starved — no task ever blocks/delays |
-| Random corruption / crash after a while | Stack too small — enable `configCHECK_FOR_STACK_OVERFLOW = 2`, check high-water marks |
-| Queue "loses" data | Queued a pointer to a stack local that went out of scope; or sender overran a full queue and ignored the return code |
-| `xQueueSend` from ISR does nothing / asserts | Used the non-ISR API in an ISR — must use `...FromISR` |
-| Higher-priority task not woken after ISR | Forgot `portYIELD_FROM_ISR(pxHigherPriorityTaskWoken)` |
-| Mutex "give" from ISR fails | Mutexes have ownership — can't be given from an ISR; use a binary semaphore |
-| Periodic task drifts | Used `vTaskDelay` instead of `vTaskDelayUntil` |
-| Timer callback hangs the system | Blocked inside a timer callback — they run on the shared daemon task |
-| `configASSERT` fires in `port.c`/`queue.c` | Almost always an interrupt-priority misconfiguration or calling an API from the wrong context |
-| Works in debug, fails in release | `configASSERT` compiled out was hiding a real misuse; fix the root cause |
-
----
-
-*FreeRTOS API Reference — expanded into a complete guide. Covers classic single-core kernel
-plus ESP-IDF/SMP notes. Verify port-specific details against your `FreeRTOSConfig.h` and the
-official docs at freertos.org.*
+### A6. `xQueueSendFromISR(xQueue, pvItemToQueue, pxHigherPriorityTaskWoken)`
+
+**Parameters:**
+1. xQueue: queue handle.
+2. pvItemToQueue: source item's address.
+3. pxHigherPriorityTaskWoken: pointer to pdFALSE-initialized BaseType_t; API sets when needed.
+
+**Return:** pdPASS / errQUEUE_FULL. **Practical trap / why:** No wait; after ISR API use port-specific yield if flag true.
+
+### A7. `xQueueReceiveFromISR(xQueue, pvBuffer, pxHigherPriorityTaskWoken)`
+
+**Parameters:**
+1. xQueue: queue handle.
+2. pvBuffer: writable output.
+3. pxHigherPriorityTaskWoken: flag for newly unblocked higher priority task.
+
+**Return:** pdPASS / pdFAIL. **Practical trap / why:** ISR must be short; only if port/API allowed.
+
+### A8. `xQueueOverwrite(xQueue, pvItemToQueue)`
+
+**Parameters:**
+1. xQueue: queue length MUST be 1.
+2. pvItemToQueue: latest value's address.
+
+**Return:** pdPASS. **Practical trap / why:** Mailbox; old value intentionally overwritten.
+
+### A9. `xSemaphoreTake(xSemaphore, xTicksToWait)`
+
+**Parameters:**
+1. xSemaphore: binary/counting/mutex handle.
+2. xTicksToWait: unavailable token/lock par max ticks.
+
+**Return:** pdTRUE on take / pdFALSE on timeout. **Practical trap / why:** Mutex take has owner; semaphore take has token semantics.
+
+### A10. `xSemaphoreGive(xSemaphore)`
+
+**Parameters:**
+1. xSemaphore: valid semaphore/mutex handle; for mutex give by owner.
+
+**Return:** pdTRUE / pdFALSE. **Practical trap / why:** Binary/counting full hone par failure possible; never give mutex from ISR.
+
+### A11. `xSemaphoreGiveFromISR(xSemaphore, pxHigherPriorityTaskWoken)`
+
+**Parameters:**
+1. xSemaphore: binary/counting handle only.
+2. pxHigherPriorityTaskWoken: pdFALSE-initialized wake flag pointer.
+
+**Return:** pdTRUE / pdFALSE. **Practical trap / why:** ISR context, no mutex; portYIELD_FROM_ISR as needed.
+
+### A12. `xSemaphoreCreateCounting(uxMaxCount, uxInitialCount)`
+
+**Parameters:**
+1. uxMaxCount: absolute bound.
+2. uxInitialCount: initial tokens, not more than maximum.
+
+**Return:** SemaphoreHandle_t or NULL. **Practical trap / why:** Events start at 0; N free resources start at N.
+
+### A13. `xSemaphoreTakeRecursive(xMutex, xTicksToWait)`
+
+**Parameters:**
+1. xMutex: recursive mutex created by matching API.
+2. xTicksToWait: wait if another task owns it.
+
+**Return:** pdTRUE / pdFALSE. **Practical trap / why:** Same task nested takes allowed, matching gives required.
+
+### A14. `xSemaphoreGiveRecursive(xMutex)`
+
+**Parameters:**
+1. xMutex: recursive mutex currently owned by calling task.
+
+**Return:** pdTRUE / pdFALSE. **Practical trap / why:** Use only with recursive mutex; no ISR.
+
+### A15. `xTaskNotify(xTaskToNotify, ulValue, eAction)`
+
+**Parameters:**
+1. xTaskToNotify: target task handle.
+2. ulValue: 32-bit payload/mask (ignored for eIncrement/eNoAction).
+3. eAction: overwrite, OR bits, increment, etc..
+
+**Return:** pdPASS / pdFAIL for no-overwrite pending. **Practical trap / why:** No queue of structs; one target notification state/value.
+
+### A16. `xTaskNotifyWait(ulBitsToClearOnEntry, ulBitsToClearOnExit, pulNotificationValue, xTicksToWait)`
+
+**Parameters:**
+1. ulBitsToClearOnEntry: mask cleared when entering wait if no pending notification.
+2. ulBitsToClearOnExit: mask cleared before return after value copied.
+3. pulNotificationValue: optional output pointer for observed 32-bit value.
+4. xTicksToWait: max wait for pending notification.
+
+**Return:** pdTRUE notified / pdFALSE timeout. **Practical trap / why:** For count-style notify prefer ulTaskNotifyTake.
+
+### A17. `ulTaskNotifyTake(xClearCountOnExit, xTicksToWait)`
+
+**Parameters:**
+1. xClearCountOnExit: pdTRUE clears all count; pdFALSE decrements one.
+2. xTicksToWait: max block if count zero.
+
+**Return:** uint32_t pre-clear/pre-decrement value (0 on timeout). **Practical trap / why:** Not a generic message queue; no payload history.
+
+### A18. `xEventGroupSetBits(xEventGroup, uxBitsToSet)`
+
+**Parameters:**
+1. xEventGroup: event handle.
+2. uxBitsToSet: OR bit mask.
+
+**Return:** EventBits_t resulting bit state. **Practical trap / why:** Repeated setting same bit doesn't count multiple events.
+
+### A19. `xEventGroupWaitBits(xEventGroup, uxBitsToWaitFor, xClearOnExit, xWaitForAllBits, xTicksToWait)`
+
+**Parameters:**
+1. xEventGroup: handle.
+2. uxBitsToWaitFor: mask of relevant bits.
+3. xClearOnExit: pdTRUE auto-clear matched flags on satisfaction.
+4. xWaitForAllBits: pdTRUE AND, pdFALSE OR.
+5. xTicksToWait: timeout ticks.
+
+**Return:** EventBits_t snapshot, inspect required condition/timeout. **Practical trap / why:** For level readiness often xClearOnExit=pdFALSE.
+
+### A20. `xEventGroupSync(xEventGroup, uxBitsToSet, uxBitsToWaitFor, xTicksToWait)`
+
+**Parameters:**
+1. xEventGroup: shared group.
+2. uxBitsToSet: unique arrival bit for calling task.
+3. uxBitsToWaitFor: collective ALL-mask.
+4. xTicksToWait: barrier timeout.
+
+**Return:** EventBits_t bits seen. **Practical trap / why:** Barrier implementation; don't confuse with one-time init bits.
+
+### A21. `xTimerCreate(pcTimerName, xTimerPeriodInTicks, uxAutoReload, pvTimerID, pxCallbackFunction)`
+
+**Parameters:**
+1. pcTimerName: debug name.
+2. xTimerPeriodInTicks: nonzero period ticks.
+3. uxAutoReload: pdTRUE periodic, pdFALSE one-shot.
+4. pvTimerID: per-timer application pointer.
+5. pxCallbackFunction: void callback(TimerHandle_t).
+
+**Return:** TimerHandle_t or NULL. **Practical trap / why:** Timer callback runs in timer daemon task.
+
+### A22. `xTimerChangePeriod(xTimer, xNewPeriod, xTicksToWait)`
+
+**Parameters:**
+1. xTimer: existing timer handle.
+2. xNewPeriod: new interval in ticks (not milliseconds).
+3. xTicksToWait: how long caller can wait to post command.
+
+**Return:** pdPASS / pdFAIL. **Practical trap / why:** Callback must be short; command can fail if timer command queue full.
+
+### A23. `xTimerStart(xTimer, xTicksToWait)`
+
+**Parameters:**
+1. xTimer: timer handle.
+2. xTicksToWait: timer command queue send timeout (NOT timer period).
+
+**Return:** pdPASS / pdFAIL. **Practical trap / why:** Command acceptance and callback execution are different stages.
+
+### A24. `xTimerReset(xTimer, xTicksToWait)`
+
+**Parameters:**
+1. xTimer: timer handle.
+2. xTicksToWait: command queue wait duration.
+
+**Return:** pdPASS / pdFAIL. **Practical trap / why:** Restarts countdown for debounce/inactivity.
+
+### A25. `xStreamBufferCreate(xBufferSizeBytes, xTriggerLevelBytes)`
+
+**Parameters:**
+1. xBufferSizeBytes: byte storage capacity.
+2. xTriggerLevelBytes: number of bytes desired to unblock receiver, where possible.
+
+**Return:** StreamBufferHandle_t or NULL. **Practical trap / why:** Framing not preserved.
+
+### A26. `xStreamBufferSend(xStreamBuffer, pvTxData, xDataLengthBytes, xTicksToWait)`
+
+**Parameters:**
+1. xStreamBuffer: buffer handle.
+2. pvTxData: bytes input.
+3. xDataLengthBytes: requested byte count.
+4. xTicksToWait: maximum wait for buffer space.
+
+**Return:** bytes actually sent. **Practical trap / why:** Partial writes possible; must handle return.
+
+### A27. `xStreamBufferReceive(xStreamBuffer, pvRxData, xBufferLengthBytes, xTicksToWait)`
+
+**Parameters:**
+1. xStreamBuffer: buffer handle.
+2. pvRxData: writable byte array.
+3. xBufferLengthBytes: output capacity.
+4. xTicksToWait: maximum wait.
+
+**Return:** bytes actually received. **Practical trap / why:** Treat as stream, not packet.
+
+### A28. `xMessageBufferCreate(xBufferSizeBytes)`
+
+**Parameters:**
+1. xBufferSizeBytes: total capacity including framing overhead.
+
+**Return:** MessageBufferHandle_t or NULL. **Practical trap / why:** Message buffers preserve per-message boundaries.
+
+### A29. `xMessageBufferSend(xMessageBuffer, pvTxData, xDataLengthBytes, xTicksToWait)`
+
+**Parameters:**
+1. xMessageBuffer: handle.
+2. pvTxData: complete message data.
+3. xDataLengthBytes: message length.
+4. xTicksToWait: room wait limit.
+
+**Return:** bytes sent or 0. **Practical trap / why:** Message needs full space including header.
+
+### A30. `xMessageBufferReceive(xMessageBuffer, pvRxData, xBufferLengthBytes, xTicksToWait)`
+
+**Parameters:**
+1. xMessageBuffer: handle.
+2. pvRxData: output writable buffer.
+3. xBufferLengthBytes: max output bytes.
+4. xTicksToWait: wait for message.
+
+**Return:** message length or 0. **Practical trap / why:** Too small receive buffer cannot accept pending message.
+
+### A31. `xQueueCreateSet(uxEventQueueLength)`
+
+**Parameters:**
+1. uxEventQueueLength: sum capacities / max pending events across members.
+
+**Return:** QueueSetHandle_t or NULL. **Practical trap / why:** Not a substitute for a shared tagged queue when simpler.
+
+### A32. `xQueueAddToSet(xQueueOrSemaphore, xQueueSet)`
+
+**Parameters:**
+1. xQueueOrSemaphore: member queue/semaphore not simultaneously used outside set rules.
+2. xQueueSet: created set handle.
+
+**Return:** pdPASS / pdFAIL. **Practical trap / why:** Subscribe member once, then select before receive.
+
+### A33. `xQueueSelectFromSet(xQueueSet, xTicksToWait)`
+
+**Parameters:**
+1. xQueueSet: set of members.
+2. xTicksToWait: wait for any member readiness.
+
+**Return:** ready member handle or NULL. **Practical trap / why:** Then read that selected object.
+
+### A34. `pvPortMalloc(xWantedSize)`
+
+**Parameters:**
+1. xWantedSize: heap bytes requested.
+
+**Return:** void* or NULL. **Practical trap / why:** Heap scheme/config determines free/coalescing behavior.
+
+### A35. `vPortFree(pv)`
+
+**Parameters:**
+1. pv: pointer allocated by matching FreeRTOS heap API.
+
+**Return:** void. **Practical trap / why:** Not supported for freeing in heap_1.
+
+### A36. `uxTaskGetStackHighWaterMark(xTask)`
+
+**Parameters:**
+1. xTask: task handle, NULL means self.
+
+**Return:** minimum ever unused stack; units port-dependent. **Practical trap / why:** ESP-IDF returns bytes; vanilla words.
+
+### A37. `vTaskPrioritySet(xTask, uxNewPriority)`
+
+**Parameters:**
+1. xTask: handle, NULL means self.
+2. uxNewPriority: 0..configMAX_PRIORITIES-1.
+
+**Return:** void. **Practical trap / why:** Scheduler may immediately pick a different task.
+
+### A38. `xTaskCreatePinnedToCore(pvTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask, xCoreID)`
+
+**Parameters:**
+1. pvTaskCode: task entry.
+2. pcName: debug task name.
+3. usStackDepth: ESP-IDF bytes.
+4. pvParameters: stable task argument pointer.
+5. uxPriority: relative priority.
+6. pxCreatedTask: optional out handle.
+7. xCoreID: CPU index or tskNO_AFFINITY.
+
+**Return:** pdPASS / failure. **Practical trap / why:** ESP-IDF only; avoid unnecessary affinity.
+
+> Reminder: exact declaration/version can vary by kernel and ESP-IDF port. Check installed headers before copying a signature verbatim.
