@@ -1,566 +1,730 @@
-# FreeRTOS Scenario-Based Interview Questions
+# FreeRTOS Real-World Scenarios — Hinglish Interview Workbook
 
-> 40 real-world design scenarios. Each has an **Optimal Approach** (what a strong candidate
-> answers) and an **Alternative Solution** (a valid trade-off or fallback), plus the key
-> reasoning interviewers are listening for.
+> **No bookish definitions.** Har question: actual situation → **best choice + kyun** → alternative tradeoff → interviewer counter-question. Pehle answer khud bolna, phir explanation read karna.
 >
-> Companion to [`FREE_RTOS_API.md`](./FREE_RTOS_API.md) — API details are cross-referenced there.
+> APIs ke **exact parameters and working code**: [FREE_RTOS_API.md](./FREE_RTOS_API.md). Same project: ESP-IDF/ESP32 ke deviations explicitly mention kiye hain.
+
+## How to answer any RTOS design question (interview template)
+1. **Is information sent?** Agar actual data/struct/bytes bhejne hain to queue/message/stream; sirf event signal ho to notification/semaphore.
+2. **Who waits?** Exactly one known task = direct notification. Multiple tasks = queue/semaphore/event group based on semantics.
+3. **Will producer outrun consumer?** Worst-case burst, queue depth, timeout, drop/backpressure, priority starvation discuss.
+4. **Is it shared ownership?** Mutex + inheritance, not binary semaphore.
+5. **What is context?** ISR = FromISR only; zero blocking; optional yield on exit.
+6. **What's failure behavior?** Zero wait vs nonzero wait, overflow, timeout, stack, deadlines.
+7. **What is better alternative?** Choose only after explaining why simplest is sufficient.
+
+## First: 6 timing and task traps
+
+**Tick vs milliseconds:** 100Hz = 10ms/tick; 1000Hz = 1ms/tick. `pdMS_TO_TICKS(500)` converts; `vTaskDelay(500)` means 500 ticks. `xTaskGetTickCount()` returns ticks, not milliseconds.
+
+**Ready ≠ Running:** Event makes blocked high-priority task Ready; scheduler picks it if rules allow. ISR port yield improves switch latency on exit.
+
+**Blocked ≠ Suspended:** Queue/sem/notify wait with positive timeout = Blocked; `vTaskSuspend()` = Suspended until resume. Zero-timeout send fail = remains running/ready.
+
+**taskYIELD ≠ delay:** Yield doesn't wait for a timeout; lower priorities don't get CPU while higher-priority task constantly Ready.
+
+**ESP-IDF stack units:** ESP-IDF xTaskCreate stack depth bytes; standard FreeRTOS uses stack words. Double check version/port.
+
+**No magic precise time:** `vTaskDelayUntil` periodic schedule reduces drift, but hard 1kHz precision needs WCET analysis/hardware.
+
+## The 40 scenarios (in interview order)
 
 ---
 
-## Table of Contents
+## A. Signaling & synchronization
 
-- [A. Signaling & Synchronization](#a-signaling--synchronization)
-- [B. Data Passing](#b-data-passing)
-- [C. Shared Resources & Mutual Exclusion](#c-shared-resources--mutual-exclusion)
-- [D. Timing & Periodic Work](#d-timing--periodic-work)
-- [E. Interrupts & Deferred Processing](#e-interrupts--deferred-processing)
-- [F. Power, Memory & Reliability](#f-power-memory--reliability)
-- [G. Architecture & Debugging](#g-architecture--debugging)
-- [Quick Decision Cheat Sheet](#quick-decision-cheat-sheet)
+### Q1. GPIO interrupt se ek task wake karna?
 
----
+**Situation samjho:** Interviewer pooch raha hai ki 'gpio interrupt se ek task wake karna' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-## A. Signaling & Synchronization
+**Best approach — aur kyun:** Direct task notification: ISR mein vTaskNotifyGiveFromISR(handle,&hpw), task mein ulTaskNotifyTake(pdTRUE,portMAX_DELAY).
 
-### Q1. A GPIO interrupt must wake exactly one known task as fast as possible. How?
+**Alternative / kab better:** Binary semaphore bhi valid; notification dedicated receiver ke liye lightweight.
 
-**Optimal Approach:** Use a **direct-to-task notification**. In the ISR call
-`vTaskNotifyGiveFromISR(handlerTask, &woken)` then `portYIELD_FROM_ISR(woken)`; the task blocks
-on `ulTaskNotifyTake(pdTRUE, portMAX_DELAY)`. Zero extra RAM (it lives in the TCB), ~45% faster
-than a binary semaphore, and it targets one specific task.
+**Interviewer counter-question:** ISR gives before wait? Pending notification retained. ISR end par portYIELD_FROM_ISR(hpw) kyun?
 
-**Alternative:** A **binary semaphore** (`xSemaphoreGiveFromISR` / `xSemaphoreTake`). Slightly
-slower and needs a semaphore object, but is the right call if **multiple** tasks might need to
-wait on the event, or if the signaling source isn't always the same task.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Why:** Interviewers want you to reach for notifications when it's 1-sender→1-known-receiver.
+### Q2. ISR burst: 5 interrupts before task runs?
 
----
+**Situation samjho:** Interviewer pooch raha hai ki 'isr burst: 5 interrupts before task runs' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-### Q2. An ISR can fire several times before its handler task gets to run. You must not lose any events. What primitive?
+**Best approach — aur kyun:** Counting notification: ISR notification increment kare; task ulTaskNotifyTake(pdFALSE,...) se one-by-one counts consume kare.
 
-**Optimal Approach:** A **counting semaphore** (`xSemaphoreCreateCounting(max, 0)`). Each
-`xSemaphoreGiveFromISR` increments the count; the task loops `xSemaphoreTake` once per event, so
-every burst is processed. Equivalent: a task notification used as a counter
-(`ulTaskNotifyTake(pdFALSE, ...)` — `pdFALSE` = don't clear, decrement one at a time).
+**Alternative / kab better:** Counting semaphore max count bound ke saath; queue if each interrupt has payload.
 
-**Alternative:** A **queue** carrying an event descriptor — same "no loss" guarantee *and* you
-get the event's data, at higher RAM/time cost. Use this if each event carries a payload.
+**Interviewer counter-question:** pdTRUE use karoge to repeated interrupts ka count clear hokar events coalesce ho sakte hain; overflow policy?
 
-**Trap to avoid:** A **binary** semaphore latches at 1 and silently drops the extra events.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
----
+### Q3. Sensor + GPS + network teeno ready?
 
-### Q3. A task must wait until three independent subsystems (sensor, GPS, network) have all initialized. How?
+**Situation samjho:** Interviewer pooch raha hai ki 'sensor + gps + network teeno ready' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Optimal Approach:** An **event group**. Each subsystem calls `xEventGroupSetBits` with its own
-bit; the waiter calls `xEventGroupWaitBits(group, SENSOR|GPS|NET, pdTRUE, pdTRUE, portMAX_DELAY)`
-— `xWaitForAllBits = pdTRUE` blocks until **all** are set (AND), then clears them.
+**Best approach — aur kyun:** EventGroupSetBits on each subsystem; xEventGroupWaitBits(flags,ALL,pdFALSE,pdTRUE,timeout).
 
-**Alternative:** A **counting semaphore** initialized to 0 where each subsystem gives once and
-the waiter takes three times. Works, but loses the identity of *which* subsystem is late — worse
-for diagnostics.
+**Alternative / kab better:** Three notifications managed by coordinator possible but more bookkeeping.
 
----
+**Interviewer counter-question:** WaitForAllBits pdFALSE hai to kya hoga? Auto-clear se sticky readiness disappear?
 
-### Q4. Multiple worker tasks must all reach a common point before any continues (a barrier). How?
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Optimal Approach:** `xEventGroupSync()`. Each worker atomically sets its own arrival bit and
-waits for the full set — no race between "announce" and "wait." All are released together.
+### Q4. 3 workers ek barrier par wait?
 
-**Alternative:** A counting semaphore plus a "release" semaphore/notification managed by a
-coordinator task. More moving parts and easy to get wrong; only worth it if you also need to run
-coordinator logic at the barrier.
+**Situation samjho:** Interviewer pooch raha hai ki '3 workers ek barrier par wait' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
----
+**Best approach — aur kyun:** xEventGroupSync(group,myBit,ALL_BITS,timeout) all arrive together.
 
-### Q5. One event must wake several waiting tasks simultaneously (broadcast). How?
+**Alternative / kab better:** Coordinator + per-worker notifications if custom release logic.
 
-**Optimal Approach:** An **event group** — set a bit, and *every* task blocked on that bit
-unblocks. This is the natural one-to-many broadcast in FreeRTOS.
+**Interviewer counter-question:** SetBits+WaitBits separately race kyun la sakta? Barrier timeout mein recovery kaise?
 
-**Alternative:** Give a **counting semaphore** N times (once per waiter), or notify each task by
-handle in a loop. Both require knowing the waiter count; the event group doesn't.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Trap:** A binary semaphore only releases **one** waiter — not a broadcast.
+### Q5. Ek event se 3 tasks wake?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'ek event se 3 tasks wake' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Event group bit on common condition; multiple tasks can wait with no/appropriate clearing; task notifications individually to exact 3 handles also possible.
+
+**Alternative / kab better:** Binary semaphore gives one waiter token, broadcast nahi.
+
+**Interviewer counter-question:** xClearOnExit pdTRUE karke kitne waiters release honge? Waiters ke arrival timing matter?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q6. Task A and B ping pong?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'task a and b ping pong' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Each task gets its own notification, exchange notify after producing; shared state protected or payload via queues.
+
+**Alternative / kab better:** Two queues for actual bidirectional payload.
+
+**Interviewer counter-question:** Notification count 1/0 and lost turn ka deadlock kaise avoid karoge?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
 
 ---
 
-### Q6. Two tasks each need to know when the other has produced a result, ping-pong style. How?
+## B. Passing data & queues
 
-**Optimal Approach:** Two **binary semaphores** (or two task notifications, one per direction).
-Task A does work, gives semB, waits on semA; Task B waits on semB, works, gives semA. Clean
-hand-off, no shared flag polling.
+### Q7. Fast producer slow consumer?
 
-**Alternative:** A single **queue** each way, if the "result" is actual data rather than a bare
-signal — combines the sync with the data transfer.
+**Situation samjho:** Interviewer pooch raha hai ki 'fast producer slow consumer' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
----
+**Best approach — aur kyun:** Queue length based on worst-case burst, xQueueSend timeout/drop/backpressure policy, consumer xQueueReceive blocking.
 
-## B. Data Passing
+**Alternative / kab better:** Latest only: overwrite mailbox; no loss: capacity + throughput requirements re-design.
 
-### Q7. Producer task generates sensor structs; consumer task processes them, occasionally slower than they arrive. Design the link.
+**Interviewer counter-question:** Producer 10ms, consumer 100ms, length 5, wait=0: producer blocked hota? If highest-priority busy-spin then who runs?
 
-**Optimal Approach:** A **queue** sized to absorb bursts: `xQueueCreate(depth, sizeof(Reading_t))`.
-Producer `xQueueSend` with a short timeout; consumer `xQueueReceive(portMAX_DELAY)`. Decouples
-the two rates and preserves order. Choose `depth` from worst-case burst × processing latency.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Alternative:** A **stream/message buffer** if the payload is raw bytes / variable length. If
-only the *latest* reading matters, switch to a mailbox (see Q9).
+### Q8. 512-byte struct queue copy expensive?
 
-**Follow-up they'll ask:** What if the queue fills? Decide policy: block (back-pressure), drop
-newest, or overwrite oldest — and justify it.
+**Situation samjho:** Interviewer pooch raha hai ki '512-byte struct queue copy expensive' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
----
+**Best approach — aur kyun:** Fixed pool of buffers; queue pointer/address to owned buffer, consumer returns pointer to free pool.
 
-### Q8. The struct being passed is large (e.g. 512 bytes). Queue copies are expensive. What do you do?
+**Alternative / kab better:** DMA descriptor/ring buffer for hardware streams; direct queue copy if low data rate.
 
-**Optimal Approach:** Queue a **pointer** to the buffer (`xQueueCreate(depth, sizeof(void*))`),
-not the buffer itself. Allocate from a **pre-allocated pool / memory block**, hand ownership to
-the consumer, which returns the block to the pool when done. Copy cost drops to 4 bytes.
+**Interviewer counter-question:** Pointer to stack local queued and function returns, kya crash? Who frees ownership?
 
-**Alternative:** A **message buffer** for variable-length blobs, or double-buffering with a
-mailbox if only the newest matters. Pointer-passing needs a clear **ownership contract** to
-avoid use-after-free — state that explicitly.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
----
+### Q9. Only latest temperature matters?
 
-### Q9. Many display/control tasks all need the *latest* temperature; older readings are useless. Design it.
+**Situation samjho:** Interviewer pooch raha hai ki 'only latest temperature matters' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Optimal Approach:** A **mailbox** = queue of length 1 written with `xQueueOverwrite` (never
-blocks, always holds the newest) and read with `xQueuePeek` (non-destructive, so every reader
-sees the same latest value). Writer overwrites at its own cadence; readers sample independently.
+**Best approach — aur kyun:** Queue length 1 + xQueueOverwrite(latest,&temp); xQueuePeek for snapshot.
 
-**Alternative:** A shared global protected by a mutex (or, for a single word, a plain atomic
-read). Simpler but you must manage locking; the mailbox gives lock-free multi-reader semantics.
+**Alternative / kab better:** Shared latest value guarded by mutex; event notification for freshness.
 
----
+**Interviewer counter-question:** Peek result data stale hai? Multiple readers and update consistency?
 
-### Q10. A UART RX ISR receives a continuous byte stream of unknown length; a task parses it. Design.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Optimal Approach:** A **stream buffer**. ISR calls `xStreamBufferSendFromISR` per byte/chunk;
-the parser task calls `xStreamBufferReceive` with a trigger level and timeout. Purpose-built for
-single-producer→single-consumer byte streams, lower overhead than a queue of bytes.
+### Q10. UART ISR bytes continuous receive?
 
-**Alternative:** A DMA ring buffer filled by hardware with the task notified on half/full/idle
-interrupts — highest throughput, but more platform-specific setup. A byte queue also works but
-wastes RAM/time (per-item overhead on single bytes).
+**Situation samjho:** Interviewer pooch raha hai ki 'uart isr bytes continuous receive' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
----
+**Best approach — aur kyun:** DMA/ring/stream buffer from RX ISR, parser task stream receive and construct frames.
 
-### Q11. You must pass discrete, variable-length protocol frames (e.g. JSON packets) between two tasks. Which primitive?
+**Alternative / kab better:** Queue chunks or DMA descriptors; avoid per-byte queue overhead.
 
-**Optimal Approach:** A **message buffer** — it preserves message boundaries (each receive
-returns exactly one frame via an internal length header). Single writer, single reader.
+**Interviewer counter-question:** StreamBuffer one writer/one reader; overflow/partial send? ISR-safe call?
 
-**Alternative:** A **queue of {length, pointer}** descriptors pointing at pooled buffers — needed
-if you require **multiple** senders (message buffers are strictly one-to-one) or random access.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
----
+### Q11. Variable-sized framed JSON packets?
 
-### Q12. Two producers must feed one consumer. A message buffer is one-to-one. How do you handle it?
+**Situation samjho:** Interviewer pooch raha hai ki 'variable-sized framed json packets' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Optimal Approach:** Use a **queue** (queues support multiple senders natively). Each producer
-`xQueueSend`s its item; the consumer drains in FIFO order.
+**Best approach — aur kyun:** MessageBufferSend complete frame and MessageBufferReceive whole message; dimension max frame + framing overhead.
 
-**Alternative:** Give each producer its **own** message/stream buffer and have the consumer wait
-on a **queue set** covering both. Keeps per-stream framing while still serving one consumer.
+**Alternative / kab better:** Queue of buffer pointers for multi-producer or large frames.
+
+**Interviewer counter-question:** Receive buffer smaller than next message: data lost or retained?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q12. Two producers one consumer frame transfer?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'two producers one consumer frame transfer' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Serialize writers with mutex around message buffer send, or cleaner tagged queue of message pointers.
+
+**Alternative / kab better:** Dedicated aggregator task merges producers into message buffer.
+
+**Interviewer counter-question:** Message buffer SPSC default: why multi-writer without lock unsafe?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
 
 ---
 
-## C. Shared Resources & Mutual Exclusion
+## C. Mutex, sharing & deadlock
 
-### Q13. Two tasks both transmit on the same UART/SPI peripheral. Prevent interleaved/garbled output.
+### Q13. Two tasks send same UART/SPI?
 
-**Optimal Approach:** A **mutex** (`xSemaphoreCreateMutex`). Take before the transaction, give
-after. Ownership means only the locking task can release it, and **priority inheritance**
-prevents a low-priority holder from starving a high-priority waiter.
+**Situation samjho:** Interviewer pooch raha hai ki 'two tasks send same uart/spi' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Alternative:** A dedicated **"server" task** that owns the peripheral; other tasks send
-requests via a **queue**. This serializes access with zero locking in the callers and centralizes
-error handling — preferred in larger systems.
+**Best approach — aur kyun:** Mutex surrounds transaction; xSemaphoreTake(lock,timeout), send full transaction, xSemaphoreGive(lock).
 
-**Trap:** Don't use a binary semaphore here — it lacks ownership and priority inheritance.
+**Alternative / kab better:** Single owner peripheral task receiving TX requests through queue.
 
----
+**Interviewer counter-question:** Why binary semaphore cannot solve priority inversion? ISR mutex release possible?
 
-### Q14. A recursive function needs to lock the same mutex it already holds and would deadlock itself. Fix?
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Optimal Approach:** A **recursive mutex** (`xSemaphoreCreateRecursiveMutex` +
-`xSemaphoreTakeRecursive`/`GiveRecursive`). The owning task can re-take it; each take must be
-matched by a give, and it's released only when the count hits zero.
+### Q14. Nested function takes same lock twice?
 
-**Alternative:** **Refactor** so the lock is acquired once at the top-level entry and the inner
-functions assume it's held (lock-free internals). Cleaner and cheaper — recursion + shared locks
-is often a design smell.
+**Situation samjho:** Interviewer pooch raha hai ki 'nested function takes same lock twice' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
----
+**Best approach — aur kyun:** Recursive mutex with xSemaphoreTakeRecursive / xSemaphoreGiveRecursive same count.
 
-### Q15. A low-priority task holds a mutex a high-priority task needs, and a medium task keeps preempting the low one. The high task starves. Name and fix it.
+**Alternative / kab better:** Refactor to internal function that assumes caller owns lock; usually simpler.
 
-**Optimal Approach:** This is **priority inversion**. Fix: use a FreeRTOS **mutex**, which applies
-**priority inheritance** automatically — the low-priority holder is temporarily boosted to the
-waiter's priority so it finishes and releases quickly, then drops back.
+**Interviewer counter-question:** Regular mutex re-take by same task causes what? Recursive mutex can still deadlock across tasks?
 
-**Alternative:** A **priority ceiling** protocol (manual in FreeRTOS): raise the task to the
-resource's ceiling priority *before* taking the lock and restore after. Bounds inversion to one
-critical section and prevents deadlock among tasks sharing that ceiling.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
----
+### Q15. Priority inversion L/H/M?
 
-### Q16. You only need to protect a two-line update to a shared 32-bit variable. Mutex feels heavy. What's better?
+**Situation samjho:** Interviewer pooch raha hai ki 'priority inversion l/h/m' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Optimal Approach:** A **critical section** (`taskENTER_CRITICAL` / `taskEXIT_CRITICAL`) around
-the few instructions. It's microseconds long, no context switch, no separate object. Ideal for
-touching a flag or hardware register.
+**Best approach — aur kyun:** Priority-inheritance mutex: L holds; H waits; L boosted above M until release.
 
-**Alternative:** `vTaskSuspendAll` / `xTaskResumeAll` if you must block **task** switches but keep
-**interrupts** running (e.g. the update is a bit longer but doesn't touch ISR-shared data). For a
-single aligned word on a 32-bit MCU, a plain read/write may already be atomic — but say so only
-with the ISR-safety caveat.
+**Alternative / kab better:** Reduce lock time, priority design, server task; binary semaphore lacks inheritance.
 
-**Trap:** Never call a blocking API inside a critical section or while the scheduler is suspended.
+**Interviewer counter-question:** Inheritance does NOT solve circular deadlock; two mutex case complexities?
 
----
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-### Q17. Two tasks acquire mutex A and mutex B in opposite orders and occasionally hang. Diagnose and prevent.
+### Q16. Two-line shared update atomic?
 
-**Optimal Approach:** Classic **deadlock** (circular wait). Prevent with **global lock ordering**:
-every task acquires A **before** B, always. Eliminates the circular-wait condition entirely.
+**Situation samjho:** Interviewer pooch raha hai ki 'two-line shared update atomic' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Alternative:** **Timeout + back-off** — take the second mutex with a finite `xTicksToWait`; on
-failure, release the first and retry after a short delay. Guarantees progress but wastes cycles
-and can livelock under heavy contention, so ordering is preferred.
+**Best approach — aur kyun:** Atomic operation if appropriate, or tiny port-correct critical section.
 
----
+**Alternative / kab better:** Mutex for larger data structure/any blocking work; avoid critical for I/O.
 
-### Q18. A shared resource has N identical instances (e.g. 3 DMA channels). Tasks should grab any free one and block when all are busy. How?
+**Interviewer counter-question:** ESP32 multicore: disabling local interrupts alone protects other core?
 
-**Optimal Approach:** A **counting semaphore** initialized to N. Take before using a channel
-(count→count-1), give when done. When count hits 0, further takers block until one is released.
-Pair it with a small mutex-protected free-list to pick *which* channel.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Alternative:** A **queue pre-loaded with N channel handles**: receive a handle to acquire, send
-it back to release. The queue *is* the pool and hands you the specific instance in one step — often
-cleaner than semaphore + free-list.
+### Q17. Task A takes mutex X then Y; B takes Y then X?
 
----
+**Situation samjho:** Interviewer pooch raha hai ki 'task a takes mutex x then y; b takes y then x' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-## D. Timing & Periodic Work
+**Best approach — aur kyun:** Circular wait deadlock; enforce total order X then Y for all tasks, bounded timeouts and cleanup.
 
-### Q19. A control loop must run at exactly 1 kHz regardless of how long its body takes. How?
+**Alternative / kab better:** Dedicated resource server eliminates nested locks.
 
-**Optimal Approach:** `vTaskDelayUntil()` (a.k.a. `xTaskDelayUntil`) with a
-`xTaskGetTickCount()` seed and a fixed 1 ms increment. It schedules against an **absolute** wake
-time, so execution time doesn't accumulate into the period — no drift.
+**Interviewer counter-question:** Priority inheritance helps deadlock? No. Who releases lock on timeout path?
 
-**Alternative:** A **hardware timer interrupt** at 1 kHz that gives a semaphore / notifies the
-loop task — best when you need tighter jitter than the tick allows, or the tick rate is lower
-than 1 kHz. `vTaskDelay` is **wrong** here (period = delay + run time → drift).
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q18. 3 interchangeable DMA channels?
+
+**Situation samjho:** Interviewer pooch raha hai ki '3 interchangeable dma channels' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Counting semaphore initialized 3 for number free, plus protected allocation of actual channel ID; or queue of three handles.
+
+**Alternative / kab better:** Queue of available handles elegantly counts + identifies exact resource.
+
+**Interviewer counter-question:** If semaphore decremented but no actual channel free due to bug, how diagnose?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
 
 ---
 
-### Q20. You need a callback 5 seconds after a button press, cancelable if pressed again. How?
+## D. Timing & periodic work
 
-**Optimal Approach:** A **one-shot software timer** (`xTimerCreate(..., pdFALSE, ...)`). On press,
-`xTimerReset()` (starts, or restarts the 5 s if already running); the callback fires only if no
-new press arrives. No dedicated task, no stack cost.
+### Q19. 1kHz hard real-time control loop?
 
-**Alternative:** A dedicated task that blocks on `ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000))`;
-a fresh press notifies it (restarting the wait), timeout runs the action. Use this if the action
-must **block** — timer callbacks must not.
+**Situation samjho:** Interviewer pooch raha hai ki '1khz hard real-time control loop' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
----
+**Best approach — aur kyun:** Hardware timer/peripheral trigger with bounded ISR and/or notify high priority task; measure execution/worst-case jitter.
 
-### Q21. You have 15 periodic housekeeping jobs at various intervals. Spawning 15 tasks wastes RAM. Better design?
+**Alternative / kab better:** vTaskDelayUntil(1 tick) only soft periodic if tick rate 1kHz and workload fits.
 
-**Optimal Approach:** **Software timers**. All 15 auto-reload timers share one **timer daemon
-task** (one stack), each with its own period and callback. Massive RAM saving vs 15 task stacks.
+**Interviewer counter-question:** 1ms body exceeds deadline: can any API force exact 1kHz? No. ISR nesting jitter?
 
-**Alternative:** One "scheduler" task with a **sorted timer wheel / delta list** it services in a
-loop with `vTaskDelayUntil`. More code, but gives full control and lets callbacks block (they run
-in a normal task, not the daemon).
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Constraint to state:** Timer callbacks run on the shared daemon — they must be short and
-non-blocking.
+### Q20. Cancelable 5-second debounce/off callback?
 
----
+**Situation samjho:** Interviewer pooch raha hai ki 'cancelable 5-second debounce/off callback' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-### Q22. A timer callback needs to do real work that occasionally blocks (I2C read). But callbacks must not block. Resolve.
+**Best approach — aur kyun:** One-shot software timer xTimerReset on press, xTimerStop when cancel; timer callback short.
 
-**Optimal Approach:** Keep the callback trivial — have it **signal a worker task** (notification /
-semaphore) that performs the blocking I2C read in normal task context. The timer just paces; the
-task does the work.
+**Alternative / kab better:** Task waiting notifications with timeout when timer dependency more complex.
 
-**Alternative:** Replace the timer with a **dedicated periodic task** using `vTaskDelayUntil`,
-which *can* block directly. Fewer moving parts if this is the only such job.
+**Interviewer counter-question:** xTimerReset second arg 5000 means timer 5s? No, that is timer command queue wait ticks.
 
----
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-## E. Interrupts & Deferred Processing
+### Q21. 15 periodic housekeeping jobs?
 
-### Q23. An ISR needs to do lengthy processing (parse a packet, call FreeRTOS APIs). You can't do that in the ISR. Pattern?
+**Situation samjho:** Interviewer pooch raha hai ki '15 periodic housekeeping jobs' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Optimal Approach:** **Deferred interrupt processing.** Keep the ISR minimal — capture what's
-needed and **signal a handler task** (task notification or binary semaphore), which does the heavy
-work in task context where all APIs are legal. Minimizes interrupt latency for the rest of the
-system.
+**Best approach — aur kyun:** Several software timers for small nonblocking callbacks; worker task for substantial operations.
 
-**Alternative:** `xTimerPendFunctionCallFromISR()` — queue a function pointer + args to the timer
-daemon, which runs your handler in task context. No dedicated task or semaphore needed; great for
-one-off deferred work.
+**Alternative / kab better:** One periodic scheduler task with sorted deadlines/timers if specific requirements.
 
----
+**Interviewer counter-question:** One callback blocks I2C 2s; impact on other 14 timers?
 
-### Q24. Why must you call `xQueueSendFromISR` instead of `xQueueSend` inside an ISR? What actually breaks otherwise?
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Optimal Approach:** Non-ISR APIs may **block** and manipulate the ready/blocked lists assuming
-task context. From an ISR there is no task to block, and re-entering the scheduler's lists from
-interrupt context corrupts kernel state → asserts or HardFault. `FromISR` variants **never block**
-and use interrupt-safe critical sections. Always follow with
-`portYIELD_FROM_ISR(pxHigherPriorityTaskWoken)` so a woken higher-priority task runs immediately
-on ISR exit.
+### Q22. Timer callback must do blocking I2C?
 
-**Alternative / nuance:** Only ISRs at or below `configMAX_SYSCALL_INTERRUPT_PRIORITY` may call
-*any* FreeRTOS API. Higher-priority ISRs must call **none** — they run with zero kernel latency
-and communicate via plain memory + a lower-priority ISR or flag.
+**Situation samjho:** Interviewer pooch raha hai ki 'timer callback must do blocking i2c' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Timer callback notify/send work command to worker task; worker performs I2C with timeout.
+
+**Alternative / kab better:** Single long-lived task and delayUntil instead of timer.
+
+**Interviewer counter-question:** Timer daemon task blocked: whose timers slip?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
 
 ---
 
-### Q25. After an ISR gives a semaphore, the high-priority task that wants it doesn't run until the next tick. Why, and how do you fix it?
+## E. Interrupts & deferred work
 
-**Optimal Approach:** You forgot `portYIELD_FROM_ISR(woken)`. The `FromISR` call sets
-`pxHigherPriorityTaskWoken = pdTRUE` when it unblocks a higher-priority task, but the actual
-context switch only happens if you request it at ISR exit. Add the yield and the switch is
-immediate.
+### Q23. Long ISR parse packet?
 
-**Alternative:** If sub-tick latency isn't required, letting the scheduler switch at the next tick
-is acceptable — but for responsive designs, always yield.
+**Situation samjho:** Interviewer pooch raha hai ki 'long isr parse packet' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
----
+**Best approach — aur kyun:** ISR copies tiny descriptor or gives notification; dedicated task parses outside ISR.
 
-### Q26. A sensor raises interrupts faster than your task can process, and you must not miss counts, but each interrupt has no payload. Cheapest correct mechanism?
+**Alternative / kab better:** DMA ring + task stream parsing; xTimerPendFunctionCall for short deferred function where appropriate.
 
-**Optimal Approach:** A **task notification used as a counter**:
-`vTaskNotifyGiveFromISR` in the ISR (increments the notification value), and
-`ulTaskNotifyTake(pdFALSE, ...)` in the task (decrements one per call). Zero extra objects,
-fastest path, no lost counts.
+**Interviewer counter-question:** Calling xQueueReceive with timeout from ISR why illegal?
 
-**Alternative:** A **counting semaphore** — same guarantee, works when **multiple** tasks may
-consume the events (notifications are single-target).
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
----
+### Q24. xQueueSendFromISR vs xQueueSend?
 
-## F. Power, Memory & Reliability
+**Situation samjho:** Interviewer pooch raha hai ki 'xqueuesendfromisr vs xqueuesend' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-### Q27. A coin-cell IoT device wakes every 1 ms for the tick and drains the battery. How do you cut idle power?
+**Best approach — aur kyun:** ISR-specific path cannot block or manipulate normal task wait state same way; use FromISR signature + wake flag.
 
-**Optimal Approach:** Enable **tickless idle** (`configUSE_TICKLESS_IDLE`). When all tasks will be
-blocked for many ticks, the kernel stops the periodic tick, deep-sleeps the core for that span,
-and corrects the tick count on wake. The MCU sleeps for long stretches instead of waking 1000×/s.
+**Alternative / kab better:** If ISR level can't call kernel, use hardware flag/low-priority deferred ISR route.
 
-**Alternative:** An **idle hook** that issues `__WFI()` to sleep until the next interrupt — simpler
-but still wakes every tick. Combine both: tickless for long sleeps, `WFI` for short ones. On ESP32
-this maps to **light sleep** (RAM retained).
+**Interviewer counter-question:** What if xQueueSend(...,0) from ISR? Still wrong API.
 
----
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-### Q28. Your firmware must be certifiable / must never fragment the heap or fail an allocation at runtime. How do you allocate objects?
+### Q25. Unblocked H doesn't run until tick?
 
-**Optimal Approach:** **Static allocation** everywhere — `xTaskCreateStatic`, `xQueueCreateStatic`,
-`xSemaphoreCreateBinaryStatic`, etc. You provide the buffers; there's **no heap**, so no
-fragmentation and no runtime allocation failure. Provide `vApplicationGetIdleTaskMemory` /
-`GetTimerTaskMemory`.
+**Situation samjho:** Interviewer pooch raha hai ki 'unblocked h doesn't run until tick' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Alternative:** Dynamic allocation but **only at startup** with `heap_1` (allocate-only, no free)
-— deterministic and simple, but you can never delete objects. `heap_4` (coalescing first-fit) is
-the general-purpose choice when you must free/reallocate.
+**Best approach — aur kyun:** ISR FreeRTOS API sets hpw then port-specific YIELD_FROM_ISR requests context switch at interrupt exit.
 
----
+**Alternative / kab better:** Even without explicit switch request scheduling happens later; latency unacceptable often.
 
-### Q29. A task intermittently corrupts memory and crashes after minutes of running. Prime suspect and how to confirm?
+**Interviewer counter-question:** Does yielding switch inside ISR? Typically switch requested for ISR return; port rules matter.
 
-**Optimal Approach:** **Stack overflow.** Confirm with `configCHECK_FOR_STACK_OVERFLOW = 2` (paint
-`0xA5` pattern check — catches transient overflows Method 1 misses) and a
-`vApplicationStackOverflowHook`. Also read `uxTaskGetStackHighWaterMark` for each task and grow
-the stack of any near zero.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Alternative:** If the MCU has an **MPU**, put a guard region below each stack to fault on
-overflow immediately (deterministic, catches the exact offending access). Then right-size stacks
-from the water-mark data.
+### Q26. Fast interrupt counting without payload?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'fast interrupt counting without payload' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Task notification increment on ISR, ulTaskNotifyTake(pdFALSE) drains count.
+
+**Alternative / kab better:** Counting semaphore bounded counts if multiple waiters.
+
+**Interviewer counter-question:** Overflow possible? If each interrupt uniquely timestamped, count insufficient.
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
 
 ---
 
-### Q30. Tasks you delete with `vTaskDelete` seem to leak RAM — free heap keeps dropping. Why?
+## F. Power, memory & reliability
 
-**Optimal Approach:** A deleted task's **TCB and stack are freed by the idle task**, not
-immediately. If a higher-priority task never blocks, the **idle task never runs**, so cleanup
-never happens. Fix: ensure every task yields/blocks (`vTaskDelay`, queue waits) so idle gets CPU.
+### Q27. Battery drained by 1ms tick?
 
-**Alternative:** Use **static** tasks (nothing to free) or have tasks **suspend** instead of
-delete when you'll reuse them — no cleanup dependency on idle at all.
+**Situation samjho:** Interviewer pooch raha hai ki 'battery drained by 1ms tick' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
----
+**Best approach — aur kyun:** Enable supported tickless idle; block tasks for long waits; hardware deep/light sleep + wake sources.
 
-### Q31. `pvPortMalloc` starts returning NULL after hours of uptime, though total allocations seem fine. Cause and prevention?
+**Alternative / kab better:** Lower tick rate when latency allows.
 
-**Optimal Approach:** **Heap fragmentation** from repeated malloc/free of varying sizes at
-runtime. Prevent by allocating all objects **at startup** and never in hot loops; use `heap_4`
-(coalesces adjacent free blocks) or fixed-size **memory pools**. Instrument with
-`xPortGetMinimumEverFreeHeapSize()` to size the heap and detect leaks.
+**Interviewer counter-question:** Tickless idle only when task Ready? Never idle if busy-loop; peripheral wake constraints?
 
-**Alternative:** Switch to **static allocation** entirely, or `heap_5` if you need to span
-multiple RAM banks. Add `vApplicationMallocFailedHook` to catch and log any failure instead of
-silently continuing.
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
----
+### Q28. No dynamic allocations during runtime?
 
-### Q32. You must guarantee a watchdog is fed only if all critical tasks are alive and healthy. Design.
+**Situation samjho:** Interviewer pooch raha hai ki 'no dynamic allocations during runtime' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Optimal Approach:** A **supervisor task** (or timer) that requires each critical task to
-periodically set its bit in an **event group** (or increment a per-task heartbeat counter). The
-supervisor only kicks the hardware watchdog when **all** expected bits are set within the window;
-otherwise it lets the watchdog reset the system.
+**Best approach — aur kyun:** Static task/queue/semaphore/timer creation where supported, allocate before scheduler start; size memory upfront.
 
-**Alternative:** Each task refreshes a timestamp in a shared, mutex-protected struct; the
-supervisor checks all timestamps are recent. Equivalent guarantee, slightly more code than the
-event-group AND-wait.
+**Alternative / kab better:** Fixed memory pools with bounded behavior.
 
----
+**Interviewer counter-question:** Static storage lifetime valid? sizeof stack in words vs ESP bytes nuance?
 
-## G. Architecture & Debugging
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-### Q33. One task must service several sources — a data queue, a command queue, and a "shutdown" semaphore — blocking efficiently on all. How?
+### Q29. Random corruption after minutes?
 
-**Optimal Approach:** A **queue set** (`xQueueCreateSet` + `xQueueAddToSet`). The task blocks on
-`xQueueSelectFromSet`, which returns whichever member is ready; the task then receives/takes from
-that specific member. One blocking point, no polling.
+**Situation samjho:** Interviewer pooch raha hai ki 'random corruption after minutes' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Alternative:** If the sources are just flags/events (no payload), an **event group** is lighter.
-If everything can be reduced to messages, funnel all sources into **one queue** carrying a tagged
-union `{type, data}` — often the simplest robust design.
+**Best approach — aur kyun:** Check stack watermark, stack overflow hook, heap integrity, buffer bounds, dangling pointers, race.
 
----
+**Alternative / kab better:** Use guard patterns/trace/MPU where supported.
 
-### Q34. How do you decide task priorities so the system meets deadlines?
+**Interviewer counter-question:** StackHighWaterMark measures unused min stack, does it prove no out-of-bounds write? No.
 
-**Optimal Approach:** **Rate-monotonic** reasoning — shorter period / tighter deadline ⇒ higher
-priority. Keep the number of priority levels small, ensure every task has a blocking point so
-lower-priority tasks get CPU, and reserve the highest levels for latency-critical ISRs' handler
-tasks. Validate with run-time stats (`vTaskGetRunTimeStats`).
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-**Alternative:** **Deadline-driven** grouping when periods don't map cleanly — assign by criticality
-tiers and verify empirically with a trace tool (Tracealyzer/SystemView). State the assumption that
-FreeRTOS is fixed-priority preemptive, not EDF.
+### Q30. Task delete appears heap leak?
 
----
+**Situation samjho:** Interviewer pooch raha hai ki 'task delete appears heap leak' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-### Q35. Two equal-priority tasks are both CPU-bound; one appears to starve the other. What's happening and the options?
+**Best approach — aur kyun:** Idle task may reclaim task memory when scheduled; application-owned buffers not auto-freed.
 
-**Optimal Approach:** With `configUSE_TIME_SLICING = 1`, equal-priority Ready tasks **round-robin**
-each tick — but a task that never blocks and one that occasionally blocks won't share evenly, and
-if slicing is off, the first one runs until it yields. Give each a blocking/yield point, or split
-their priorities so the more urgent one preempts.
+**Alternative / kab better:** Prefer tasks persist and block rather than create/delete frequently.
 
-**Alternative:** Insert an explicit `taskYIELD()` in the long-running loop, or redesign the
-CPU-bound work into chunks that block on a queue/notification — cooperative fairness instead of
-relying on slicing.
+**Interviewer counter-question:** Does vTaskDelete release mutex ownership and malloced app buffers? No.
 
----
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
-### Q36. You suspect a task overflows its stack but don't know which. How do you find it without a debugger attached?
+### Q31. pvPortMalloc eventually NULL?
 
-**Optimal Approach:** Enable `configCHECK_FOR_STACK_OVERFLOW = 2` and implement
-`vApplicationStackOverflowHook(xTask, pcTaskName)` to log the offending task's **name** (over UART
-/ to flash) before halting. Deterministic identification.
+**Situation samjho:** Interviewer pooch raha hai ki 'pvportmalloc eventually null' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
 
-**Alternative:** Periodically walk all tasks with `uxTaskGetSystemState` / `vTaskList` and print
-each **high-water mark**; the task trending toward 0 is your culprit. Good for proactive
-monitoring, not just post-mortem.
+**Best approach — aur kyun:** Fragmentation / leak / out-of-memory; heap_4 coalesces, heap_5 multi-region; inspect largest free block where available.
+
+**Alternative / kab better:** Static/pool allocation for predictable usage.
+
+**Interviewer counter-question:** Free heap bytes large but no contiguous block enough—possible?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q32. Watchdog only fed if all tasks healthy?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'watchdog only fed if all tasks healthy' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Supervisor task checks heartbeat counters/timeouts for all critical tasks, then feeds watchdog only if each fresh.
+
+**Alternative / kab better:** Task-level watchdog registrations if supported.
+
+**Interviewer counter-question:** A task updating heartbeat but stuck making no progress? Need meaningful milestone heartbeat.
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
 
 ---
 
-### Q37. The system runs fine in debug but HardFaults in release the moment an interrupt fires. Most likely cause?
+## G. System design & debugging
 
-**Optimal Approach:** An **interrupt-priority misconfiguration** — an ISR at a priority **above**
-`configMAX_SYSCALL_INTERRUPT_PRIORITY` is calling a `...FromISR` API, or the priority-bit shift is
-wrong for the MCU's `configPRIO_BITS`. In debug, `configASSERT` in `port.c` would have caught it;
-in release it's compiled out, so the corruption surfaces as a fault. Fix the priorities and keep
-`configASSERT` enabled during development.
+### Q33. One task waits data queue, command queue, shutdown sem?
 
-**Alternative:** The fault is an uninitialized/optimized-away variable exposed by release
-optimization — but with the "on interrupt" timing, priority misconfig is the textbook answer.
+**Situation samjho:** Interviewer pooch raha hai ki 'one task waits data queue, command queue, shutdown sem' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Queue set allows select from multiple queue/semaphore members; capacity rules and select-before-receive.
+
+**Alternative / kab better:** Unified tagged event queue often cleaner.
+
+**Interviewer counter-question:** Queue set max pending count sizing? Direct reads race?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q34. Picking priorities for deadlines?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'picking priorities for deadlines' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Measure response times and WCET; assign urgency/deadline, block when idle, avoid prolonged critical sections.
+
+**Alternative / kab better:** Rate-monotonic fixed priority for suitable periodic assumptions; deadline analysis essential.
+
+**Interviewer counter-question:** High priority ≠ important. Can CPU 120% busy meet deadlines? No.
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q35. Equal priority CPU bound, unfair scheduling?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'equal priority cpu bound, unfair scheduling' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Check configUSE_TIME_SLICING, ticks, affinity, critical sections, and actual readiness; prefer blocking/event driven.
+
+**Alternative / kab better:** Explicit taskYIELD can help equal-priority peers but doesn't fix high priority starvation.
+
+**Interviewer counter-question:** Is time slicing guaranteed on ESP-IDF SMP as ideal round robin? No.
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q36. Which task stack overflowing??
+
+**Situation samjho:** Interviewer pooch raha hai ki 'which task stack overflowing?' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Check uxTaskGetStackHighWaterMark for each, enable configCHECK_FOR_STACK_OVERFLOW, inspect crash/backtrace.
+
+**Alternative / kab better:** Static stack instrumentation, debug tracing.
+
+**Interviewer counter-question:** ESP-IDF watermark byte units vs vanilla words?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q37. Release build HardFault when ISR fires?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'release build hardfault when isr fires' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Check interrupt priority constraints, API FromISR usage, IRAM safety, stack and optimization-sensitive undefined behavior.
+
+**Alternative / kab better:** Validate assert hooks, backtrace, Cortex-M configMAX_SYSCALL_INTERRUPT_PRIORITY or ESP-specific interrupt level.
+
+**Interviewer counter-question:** Why does code work in debug? Timing/UB differences; do not assert only one root cause.
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q38. ESP32 Wi-Fi and control interference?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'esp32 wi-fi and control interference' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Pin appropriately to cores if supported; respect IDF Wi-Fi/system task constraints; measure latency and shared contention.
+
+**Alternative / kab better:** Task priority + offload via DMA / peripheral hardware + lock discipline.
+
+**Interviewer counter-question:** Pinned task still uses shared memory/bus; core isolation enough? No.
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q39. Ultra-fast motor commutation ISR?
+
+**Situation samjho:** Interviewer pooch raha hai ki 'ultra-fast motor commutation isr' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Hardware peripheral/timer where possible; high-priority ISR that cannot call FreeRTOS, writes minimal hardware state; deferred worker for RTOS.
+
+**Alternative / kab better:** Hardware PWM/MCPWM to remove latency sensitive work from software.
+
+**Interviewer counter-question:** Can high-level ISR call xQueueSendFromISR? Not necessarily; priority constraints apply.
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
+
+### Q40. Who hogs CPU??
+
+**Situation samjho:** Interviewer pooch raha hai ki 'who hogs cpu?' ko real firmware mein kaise handle karoge. Pehle data vs signal, task vs ISR, aur bounded timeout decide karo.
+
+**Best approach — aur kyun:** Enable runtime stats with suitable monotonic counter and config; uxTaskGetSystemState / vTaskGetRunTimeStats; trace task load.
+
+**Alternative / kab better:** GPIO timing, tracing, ESP-IDF task stats/heap tracing.
+
+**Interviewer counter-question:** Stats counter frequency and idle percentage interpretation?
+
+**Failure-mode answer:** Return value verify karo, maximum blocking interval choose karo, aur CPU starvation, missed event, wrong ISR-context, overflow ya latency ko explicitly handle karo. Har design mein bounded memory + producer/consumer rate check karo.
 
 ---
 
-### Q38. On a dual-core ESP32, a task doing Wi-Fi work and your real-time control task interfere. How do you isolate them?
+## Full code walkthrough 1 — Producer fast, consumer slow, QUEUE FULL
 
-**Optimal Approach:** **Pin tasks to cores** with `xTaskCreatePinnedToCore`. Espressif pins the
-Wi-Fi/BT stack to **Core 0**; pin your deterministic control task to **Core 1** to avoid
-contention and cache/scheduler interference.
+**Question:** Producer every 10ms sensor value generate karta hai, consumer har 100ms ek value process karta, queue capacity 5 hai. Full queue pe exact behavior? Task kab Blocked?
 
-**Alternative:** Leave tasks unpinned (`tskNO_AFFINITY`) and rely on the SMP scheduler, but raise
-the control task's priority and minimize shared locks. Pinning is the stronger guarantee for
-real-time isolation.
+```c
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include <stdio.h>
+static QueueHandle_t samples;
 
-**SMP nuance:** Cross-core shared data still needs proper locking — pinning reduces contention, it
-doesn't remove the need for mutexes/critical sections.
+static void produce(void *arg) {
+    (void)arg;
+    int n = 0;
+    for (;;) {
+        int value = n++;
+        BaseType_t ok = xQueueSend(samples, &value, 0);
+        if (ok != pdPASS) {
+            // Full, zero wait => NOT blocked. Item not accepted.
+            printf("queue full at tick %lu\n",
+                   (unsigned long)xTaskGetTickCount());
+        }
+        vTaskDelay(pdMS_TO_TICKS(10)); // THIS does block periodically
+    }
+}
+static void consume(void *arg) {
+    (void)arg;
+    int v;
+    for (;;) {
+        if (xQueueReceive(samples, &v, portMAX_DELAY) == pdPASS) {
+            printf("consumed %d\n", v);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+}
+void start_demo(void) {
+    samples = xQueueCreate(5, sizeof(int));
+    configASSERT(samples);
+    configASSERT(xTaskCreate(produce, "P", 2048, NULL, 3, NULL) == pdPASS);
+    configASSERT(xTaskCreate(consume, "C", 2048, NULL, 2, NULL) == pdPASS);
+}
+// Stack depth numbers are BYTES in ESP-IDF, STACK WORDS in vanilla FreeRTOS.
+// Standard FreeRTOS app starts scheduler in platform setup; ESP-IDF already runs it.
+```
+
+**Step-by-step timeline, conceptually:** producer ~10 items per 100ms, consumer ~1 per 100ms. Queue fills after short burst. `xQueueSend(...,0)` returns **pdFAIL** when full—no queue-induced Blocked transition. The producer does block during its separate `vTaskDelay`. Consumer may wait on empty queue initially, but once processing a message it enters 100ms delay. **If producer delay is removed and it busy-spins at strictly higher priority, consumer may starve permanently.**
+
+**What if third parameter = 50 ticks?** On full queue, producer goes Blocked waiting for space **up to 50 ticks**; wakes when consumer receives, or timeout. It is not a 50-millisecond value. Actual scheduler tick rate decides time.
+
+**Interviewer sequence:** Who decides blocked? → queue full and wait 0? → queue full and wait 50? → higher priority busy loop? → how to avoid data loss? Answer: explicit error policy/backpressure/buffer sizing/throughput requirements, not blindly raising queue depth.
+
+## Full code walkthrough 2 — GPIO ISR → task notification
+
+```c
+#include "FreeRTOS.h"
+#include "task.h"
+static TaskHandle_t workerHandle = NULL;
+
+static void irq_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        uint32_t oldCount = ulTaskNotifyTake(pdFALSE, portMAX_DELAY);
+        (void)oldCount;
+        process_one_irq();
+    }
+}
+void setup_worker(void) {
+    xTaskCreate(irq_worker, "IRQ-work", 2048, NULL, 4, &workerHandle);
+}
+void gpio_irq_handler_example(void) {
+    BaseType_t hpw = pdFALSE;
+    vTaskNotifyGiveFromISR(workerHandle, &hpw);
+    portYIELD_FROM_ISR(hpw); // Verify macro for your specific port.
+}
+```
+
+**Why best?** Single receiver, no payload, ISR must be short. Count accumulates; `pdFALSE` consumes one count at a time. If all ISR occurrences independently carry data, counter alone insufficient → queue of event records.
+
+**Counter:** `pdTRUE` and `pdFALSE` difference? With pdTRUE notification value reset to 0; pdFALSE subtracts 1. `portYIELD_FROM_ISR` task context function nahi, ISR exit scheduling request hai.
+
+## Full code walkthrough 3 — Task A and Task B share UART: mutex
+
+```c
+#include "FreeRTOS.h"
+#include "semphr.h"
+static SemaphoreHandle_t txMutex;
+
+void init_bus(void) {
+    txMutex = xSemaphoreCreateMutex();
+    configASSERT(txMutex);
+}
+BaseType_t send_frame(const void *frame, size_t len) {
+    if (xSemaphoreTake(txMutex, pdMS_TO_TICKS(100)) != pdTRUE)
+        return pdFALSE;
+    // UART driver transaction must be completed safely before unlock;
+    // if async DMA, lock lifecycle needs DMA completion ownership rules.
+    uart_write_frame(frame, len);
+    xSemaphoreGive(txMutex);
+    return pdTRUE;
+}
+```
+
+**Why mutex:** Same owner locks/unlocks, priority inheritance protects H waiting for L where supported. **Binary semaphore** can signal from ISR, but has no owner/priority inheritance, so not equivalent for resource access.
+
+## Full code walkthrough 4 — AND readiness + 100ms periodic task
+
+```c
+#include "FreeRTOS.h"
+#include "task.h"
+#include "event_groups.h"
+#define SENSOR_READY (1U << 0)
+#define NET_READY    (1U << 1)
+static EventGroupHandle_t flags;
+
+static void app(void *arg) {
+    (void)arg;
+    xEventGroupWaitBits(flags, SENSOR_READY | NET_READY,
+                        pdFALSE, pdTRUE, portMAX_DELAY);
+    TickType_t last = xTaskGetTickCount();
+    TickType_t period = pdMS_TO_TICKS(100);
+    configASSERT(period > 0);
+    for (;;) {
+        do_short_periodic_work();
+        vTaskDelayUntil(&last, period);
+    }
+}
+// Setup flags = xEventGroupCreate(); init tasks SetBits as ready.
+```
+
+**Why:** Readiness is a set of persistent conditions, not count of occurrences. `pdTRUE` 4th param means AND. DelayUntil reduces period drift, **no hard exact execution guarantee** if work overruns.
 
 ---
 
-### Q39. A "fast" ISR (e.g. motor commutation) must have the lowest possible latency and must never be delayed by the kernel. How do you configure it?
+## Fast primitive decision chart
 
-**Optimal Approach:** Give that ISR a hardware priority **above**
-`configMAX_SYSCALL_INTERRUPT_PRIORITY`. The kernel's critical sections (which mask interrupts only
-*up to* that level) can never delay it → zero kernel-induced jitter. In exchange, that ISR must
-call **no** FreeRTOS API.
+| Problem asked | Start with | Avoid because |
+|---|---|---|
+| One known task wake | task notification | semaphore overhead unless multiple waiters |
+| Count repeated signal events | counted notify / counting semaphore | binary loses repeated gives |
+| Actual structs between tasks | queue | semaphore can't carry payload |
+| Only latest value | overwrite queue of length 1 | backlog adds stale readings |
+| Task waits for multiple readiness flags | event group AND/OR | bare binary semaphore has no bit identity |
+| Many tasks listen to state | event group / explicit notify fan-out | single semaphore give doesn't broadcast |
+| Shared UART/SPI/critical resource | mutex | binary semaphore lacks ownership/inheritance |
+| Few CPU instructions shared | short critical / atomics | holding mutex more than needed |
+| Bulk UART bytes | stream buffer / DMA ring | queue of individual bytes unnecessary |
+| Variable length framed messages | message buffer | stream buffer doesn't preserve frames |
+| Need bounded fixed periodic scheduling | vTaskDelayUntil | vTaskDelay accumulates work-time drift |
+| Absolute 1kHz tight jitter | hardware timer + measured handler | scheduler timing not exact by itself |
+| Brief delayed nonblocking operation | software timer | task for every timer wastes stack |
+| Multiple queue sources | queue set / common tagged queue | polling burns CPU |
+| ISR long work | FromISR notify + worker | no blocking / heavy processing inside ISR |
+| Fixed N pooled resources | counting sem + IDs / queue of handles | single mutex serializes everything |
 
-**Alternative:** Keep it at a syscall-safe priority and let it signal a task, accepting a few
-microseconds of possible masking latency — only if it actually needs kernel services.
+## 30-second answers interviewers expect
 
----
+**Blocked kab hoga?** Delay API se; queue full on SEND with xTicksToWait > 0; queue empty on RECEIVE with wait > 0; semaphore not available and waiting; notification/event wait. Scheduler READY hone tak nahi run karata.
 
-### Q40. You need per-task CPU utilization to find which task hogs the processor. How?
+**Starvation kab?** Higher-priority task constantly Ready rahe aur lower never gets CPU; full queue + tight producer retry classic trap. Delay/block/yield scheduling semantics distinguish karo.
 
-**Optimal Approach:** Enable `configGENERATE_RUN_TIME_STATS` with a **high-resolution free-running
-timer** (10–20× the tick rate) as the run-time counter, then call `vTaskGetRunTimeStats` to print
-absolute and percentage CPU per task. Purpose-built for exactly this.
+**Mutex vs semaphore?** Mutex protect shared ownership + inheritance; semaphore signal or count resources/events, no mutex-style ownership.
 
-**Alternative:** A **trace recorder** (SEGGER SystemView / Percepio Tracealyzer) via
-`configUSE_TRACE_FACILITY` for a visual timeline — richer insight (scheduling, blocking, ISR
-timing) at the cost of tooling setup.
+**Why FromISR?** ISR block nahi ho sakta. Wake flag + port yield lower latency possible karta hai. Some high-priority interrupts cannot call ANY FreeRTOS API.
 
----
+**Tick rate kya?** 100Hz means 10ms between regular ticks; xTaskGetTickCount counts ticks; convert with pdMS_TO_TICKS; scheduler tick != guaranteed CPU execution instant.
 
-## Quick Decision Cheat Sheet
+**What is port?** Processor/compiler/architecture-specific FreeRTOS implementation—context switching, interrupt handling, stack layout, tick mechanics.
 
-| If the scenario is… | Reach for… |
-|---|---|
-| ISR → one known task, fastest | Task notification (`vTaskNotifyGiveFromISR`) |
-| ISR → possibly many tasks | Binary semaphore |
-| Don't lose repeated events (no payload) | Counting semaphore / notification counter |
-| Pass data, absorb bursts | Queue |
-| Pass a big struct | Queue a pointer + memory pool |
-| Only the latest value matters, many readers | Mailbox (`xQueueOverwrite` + `xQueuePeek`) |
-| Continuous byte stream, 1→1 | Stream buffer |
-| Variable-length framed messages, 1→1 | Message buffer |
-| Protect a shared peripheral | Mutex (or a server task + queue) |
-| Same task re-locks | Recursive mutex |
-| Protect a 2-line update | Critical section |
-| Pool of N identical resources | Counting semaphore / queue-of-handles |
-| Wait for several events (AND/OR) | Event group |
-| Rendezvous / barrier | `xEventGroupSync` |
-| Fixed-frequency periodic loop | `vTaskDelayUntil` (or HW timer + notify) |
-| Cancelable delayed callback | One-shot software timer |
-| Many small periodic jobs | Software timers (shared daemon) |
-| Heavy work from an ISR | Defer to a task / `xTimerPendFunctionCall` |
-| Block on multiple sources | Queue set |
-| Cut idle power | Tickless idle + idle-hook `WFI` |
-| No heap / certifiable | Static allocation |
-| Isolate real-time work on ESP32 | Pin to a core |
+**Who should choose task priority?** Deadline and measured execution budget, not feature importance; short critical sections, bounded wait and system load analysis.
 
 ---
 
-*FreeRTOS Scenario Q&A — pairs with `FREE_RTOS_API.md`. Answers assume the classic fixed-priority
-preemptive kernel; confirm port/config specifics against your `FreeRTOSConfig.h`.*
+## Revision plan
+
+**Pass 1:** API companion's `xTaskCreate`, ticks, `vTaskDelay`, `xQueueSend`, `xQueueReceive`, `xSemaphoreTake` and `ulTaskNotifyTake` parameters explain out loud.
+
+**Pass 2:** Q1–Q40 without seeing answers: identify context, payload, receivers, blocking, best primitive and alternatives.
+
+**Pass 3:** Four walkthroughs trace task states after *every line*. Counter-questions modify wait=0 to 50 ticks, change task priorities and remove delays.
+
+**Pass 4:** ESP32 target specifics: stack depth bytes, pinned tasks, SMP critical sections, ISR priority and IDF config. Cross-check installed IDF version before compiling.
+
+*Not all snippets compile standalone: hardware handlers (`process_one_irq`, `uart_write_frame`, etc.), system initialization, GPIO ISR registration and driver hooks are project-specific placeholders. All key RTOS calls have their parameters described in the [API guide](./FREE_RTOS_API.md).*
