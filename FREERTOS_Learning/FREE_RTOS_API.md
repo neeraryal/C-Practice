@@ -52,10 +52,13 @@
 - Tickless idle mein suppressed periodic tick interrupts ke bawajood kernel elapsed ticks account karta hai.
 
 ```c
-// Example: assume configTICK_RATE_HZ = 100 (one tick = 10 ms)
-TickType_t now = xTaskGetTickCount();  // units: ticks
+// Maan lo tick rate 100 Hz hai: one tick = 10ms.
+// Current scheduler tick lo; yeh milliseconds nahi hai.
+TickType_t now = xTaskGetTickCount();  // output TICKS mein
+// 500 milliseconds ko tick units mein convert kar rahe hain.
 TickType_t gap = pdMS_TO_TICKS(500);   // 50 ticks
-vTaskDelay(gap);                       // task blocks about 500 ms (tick granularity)
+// Task ab delay ke liye Blocked, baaki Ready tasks CPU use kar sakti hain.
+vTaskDelay(gap);                       // lagbhag 500ms Blocked (tick granularity)
 ```
 
 **Counter:** `vTaskDelay(500 / portTICK_PERIOD_MS)` kab zero ho sakta hai? Jab requested milliseconds tick period se chhote hon. Zero tick ka matlab actual wait nahi. `pdMS_TO_TICKS` use karo aur minimum one tick required ho to consciously handle karo.
@@ -84,12 +87,18 @@ vTaskDelay(gap);                       // task blocks about 500 ms (tick granula
 
 ```c
 BaseType_t xTaskCreate(
-    TaskFunction_t pvTaskCode,     // 1
-    const char *pcName,           // 2
-    configSTACK_DEPTH_TYPE usStackDepth, // 3 (exact typedef depends on port)
-    void *pvParameters,           // 4
-    UBaseType_t uxPriority,       // 5
-    TaskHandle_t *pxCreatedTask   // 6
+    // 1: Task function ka address; function signature void task(void*) honi chahiye.
+    TaskFunction_t pvTaskCode,     // entry function
+    // 2: Debug aur logs mein dikhne wala task name.
+    const char *pcName,           // task name
+    // 3: Task stack size; vanilla FreeRTOS words, ESP-IDF bytes.
+    configSTACK_DEPTH_TYPE usStackDepth, // stack size: units port ke hisaab se
+    // 4: Task ko pass kiya hua object pointer, object ki lifetime valid ho.
+    void *pvParameters,           // task data pointer
+    // 5: Priority; higher number = higher priority, allowed range ke andar.
+    UBaseType_t uxPriority,       // priority
+    // 6: Task handle store karne ka output pointer; zarurat na ho to NULL.
+    TaskHandle_t *pxCreatedTask   // output task handle pointer
 );
 ```
 
@@ -110,31 +119,41 @@ BaseType_t xTaskCreate(
 #include <stdint.h>
 #include <stdio.h>
 
+// Later notification/suspend/debug ke liye task handle save hoga.
 static TaskHandle_t sensorHandle = NULL;
-static int sensorId = 42; // lifetime task se longer honi chahiye
+// Static ID ka address valid rahega; local temporary address mat dena.
+static int sensorId = 42; // task ke jeevan tak valid rehna chahiye
 
 static void sensorTask(void *arg) {
+    // void* argument ko int* cast karke pointed ID read karo.
     int id = *(int *)arg;
+    // Task continuously service karega; task function unexpectedly return nahi karega.
     for (;;) {
+        // Tick count print karenge, milliseconds nahi.
         printf("sensor %d at tick %lu\n", id,
                (unsigned long)xTaskGetTickCount());
+        // 500ms equivalent ticks tak ye task Blocked rahegi.
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
 void startTasks(void) {
+    // xTaskCreate ke 6 arguments: entry, name, stack, data, priority, handle.
     BaseType_t ok = xTaskCreate(sensorTask, "sensor", 2048,
                                 &sensorId, 3, &sensorHandle);
+    // Creation fail hua to turant debug assertion mile.
     configASSERT(ok == pdPASS);
 }
-// NOTE: 2048 is bytes for ESP-IDF, but 2048 STACK WORDS in vanilla FreeRTOS.
+// Dhyan: ESP-IDF mein stack size BYTES, vanilla FreeRTOS mein STACK WORDS hai.
 ```
 
 **Follow-ups:** `pvParameters=(void *)1` possible? Haan agar consciously integer encode kar rahe ho, but portable C mein `(intptr_t)` cast carefully use karo; normal data ke liye actual object pointer safer. `Node*` pass karoge to function mein `(Node *)arg` cast karo.
 
 ### `xTaskCreatePinnedToCore()` (ESP-IDF)
 ```c
+// ESP-IDF: last argument 1 means CPU core 1; 4096 stack BYTES hain.
 xTaskCreatePinnedToCore(sensorTask, "sensor", 4096,
+                        // Pointer, priority, handle aur target core specify kar rahe hain.
                         &sensorId, 5, &sensorHandle, 1);
 ```
 Same six params + `xCoreID` (core 0/1, or `tskNO_AFFINITY`). **Use when:** specific core affinity/driver constraint/latency analysis. **Not magic:** core pin karne se shared locks, interrupts, cache contention automatically solve nahi hote.
@@ -169,12 +188,18 @@ Ek param: number of **ticks**. `vTaskDelay(pdMS_TO_TICKS(100))` = next ~100 ms l
 
 ```c
 static void controlTask(void *arg) {
+    // Is demo mein passed argument use nahi ho raha.
     (void)arg;
+    // Last scheduled wake tick sirf ek baar initialize hota hai.
     TickType_t last = xTaskGetTickCount();
+    // 100ms ko ticks mein convert karke fixed period banao.
     const TickType_t period = pdMS_TO_TICKS(100);
+    // Tick conversion zero na ho jaaye, isliye safety check.
     configASSERT(period > 0);
     for (;;) {
-        read_and_control(); // must finish within budget
+        // Control work ko apne execution budget mein finish karna hoga.
+        read_and_control(); // execution budget ke andar complete hona chahiye
+        // Fixed schedule maintain karke repeated vTaskDelay wali drift avoid karta hai.
         vTaskDelayUntil(&last, period);
     }
 }
@@ -203,37 +228,52 @@ No args, no blocking; current task voluntarily yields. **Difference:** `vTaskDel
 **Queue kab?** Producer data items bana raha hai, consumer another task process karega; har item ki identity/payload zaroori, burst absorb karna hai. Queue item ko **copy** karti hai, pointer deep-copy nahi hota.
 
 ```c
+// Queue har Sample ke sizeof(Sample) bytes copy karegi.
 typedef struct { uint32_t seq; int temperature; } Sample;
+// Shared queue handle producer aur consumer dono use karenge.
 static QueueHandle_t q;
 
 static void producer(void *arg) {
     (void)arg;
+    // Producer ka local variable safe hai kyunki queue VALUE copy karegi.
     Sample s = {0};
     for (;;) {
+        // Har reading ko sequence ID de kar dropped samples spot kar sakte hain.
         s.seq++;
+        // Yahan dummy sensor value hai; real project mein sensor read hoga.
         s.temperature = 25;
+        // Third param 0: full queue par turant FAIL, producer SEND se Blocked nahi hota.
         if (xQueueSend(q, &s, 0) != pdPASS) {
-            // FULL: policy choose karo: drop, count, retry with timeout, etc.
+            // Full queue: drop count, bounded retry ya backpressure decide karo.
         }
-        vTaskDelay(pdMS_TO_TICKS(10)); // every 10 ms, not 10 seconds
+        // Producer 10ms delay se CPU release karta hai; ye line Blocked banati hai.
+        vTaskDelay(pdMS_TO_TICKS(10)); // har 10 milliseconds, 10 seconds nahi
     }
 }
 
 static void consumer(void *arg) {
     (void)arg;
+    // Consumer output ke liye enough storage provide karta hai.
     Sample item;
     for (;;) {
+        // Empty queue par consumer Blocked; item milte hi dequeue aur copy.
         if (xQueueReceive(q, &item, portMAX_DELAY) == pdPASS) {
+            // Consumer actual data processing karega.
             process_sample(item);
-            vTaskDelay(pdMS_TO_TICKS(100)); // artificial slow consumer
+            // Consumer ko intentionally slow banaya: 100ms/item vs 10ms/item.
+            vTaskDelay(pdMS_TO_TICKS(100)); // demo ka jaanbujhkar slow consumer
         }
     }
 }
 
 void demo(void) {
+    // Queue capacity 5 aur item size sizeof(Sample) hai.
     q = xQueueCreate(5, sizeof(Sample));
+    // Handle NULL ho to allocation fail hua.
     configASSERT(q);
+    // Producer priority 3: bina delay ka busy loop lower tasks ko starve karega.
     xTaskCreate(producer, "producer", 2048, NULL, 3, NULL);
+    // Consumer priority 2 hai, producer ki blocking se run ka chance milega.
     xTaskCreate(consumer, "consumer", 2048, NULL, 2, NULL);
 }
 ```
@@ -273,23 +313,28 @@ void demo(void) {
 - Sem count alone doesn't identify which specific resource; for resource IDs use queue of handles.
 
 ```c
+// Counting semaphore pending events ki bounded count hold karega.
 static SemaphoreHandle_t events;
 
 void init_events(void) {
+    // 10 max count, 0 initial tokens: pehle event ka wait.
     events = xSemaphoreCreateCounting(10, 0);
+    // Semaphore creation success check karo.
     configASSERT(events);
 }
 void worker(void *arg) {
     (void)arg;
     for (;;) {
+        // Count zero par worker Blocked; token milte hi successful take.
         if (xSemaphoreTake(events, portMAX_DELAY) == pdTRUE) {
+            // Ek token = ek event ka processing.
             handle_one_event();
         }
     }
 }
-// ISR: BaseType_t hpw = pdFALSE;
+// ISR: BaseType_t hpw = pdFALSE;  // initial wake flag
 // xSemaphoreGiveFromISR(events, &hpw);
-// portYIELD_FROM_ISR(hpw);  // macro/signature is port-specific
+// portYIELD_FROM_ISR(hpw);  // apne port ka macro verify karo
 ```
 
 **Comparison:** Single known receiving task + no payload → **task notification counter** often lighter. Many eligible waiters / independent reusable resource count → **counting semaphore**. Data payload chahiye → **queue**.
@@ -301,16 +346,23 @@ void worker(void *arg) {
 **Mutex = resource ownership lock**, not event. E.g. same I2C bus / UART / shared structure pe 2 tasks; one task lock, access, **same task unlock**. Mutex supports **priority inheritance** (implementation limitations apply); ISR mein take/give nahi. Binary semaphore lacks ownership and inheritance.
 
 ```c
+// Same UART resource ko do tasks overlap se bachane ka shared mutex.
 static SemaphoreHandle_t uartLock;
 void init_uart(void) {
+    // Mutex initially available hota, ownership aur inheritance support karta hai.
     uartLock = xSemaphoreCreateMutex();
+    // NULL lock use mat karo.
     configASSERT(uartLock);
 }
 void send_packet(const uint8_t *data, size_t len) {
+    // Maximum 200ms equivalent ticks tak lock ka wait kar sakte hain.
     if (xSemaphoreTake(uartLock, pdMS_TO_TICKS(200)) == pdTRUE) {
-        uart_send(data, len); // ensure this is finished/safe before give
+        // UART transaction lock ke andar complete karo, async DMA alag design mangta hai.
+        uart_send(data, len); // Give se pehle UART transaction complete/safe ho
+        // Sirf jis task ne take kiya wahi give kare; successful path unlock karo.
         xSemaphoreGive(uartLock);
     } else {
+        // Timeout par unlocked UART call nahi karni, failure handle karo.
         record_uart_timeout();
     }
 }
@@ -334,20 +386,23 @@ void send_packet(const uint8_t *data, size_t len) {
 **Use case:** ISR ko *exactly one known task* wake karna hai. Task ke TCB mein 32-bit notification value/state; separate semaphore object ki need nahi. **Receiver is task**, unrelated tasks cannot wait on same notification slot. Task notification array enabled ho to multiple slots, but task simultaneously only one slot pe block kar sakta hai.
 
 ```c
+// ISR ko specific receiver task ka handle chahiye.
 static TaskHandle_t handlerTaskHandle;
 static void handlerTask(void *unused) {
     (void)unused;
     for (;;) {
+        // pdFALSE means count se ek token consume; count 0 par task wait mein Blocked.
         uint32_t count = ulTaskNotifyTake(pdFALSE, portMAX_DELAY);
-        // pdFALSE = decrement by 1, return previous value
-        // If count > 1, next calls process remaining events.
+        // pdFALSE ek token ghatata hai, purana count return hota hai.
+        // Count > 1 hua to agli calls bache hue tokens process karengi.
+        // Har loop one event handle karega; pending tokens next iteration mein milenge.
         process_one_irq_event();
     }
 }
-// In valid FreeRTOS-callable ISR context:
-// BaseType_t hpw = pdFALSE;
-// vTaskNotifyGiveFromISR(handlerTaskHandle, &hpw);
-// portYIELD_FROM_ISR(hpw);
+// Sirf FreeRTOS API call ke liye allowed ISR context mein:
+// BaseType_t hpw = pdFALSE;  // wake flag start false
+// vTaskNotifyGiveFromISR(handlerTaskHandle, &hpw);  // ISR se signal
+// portYIELD_FROM_ISR(hpw);  // ISR exit par zarurat se switch
 ```
 
 - `xTaskNotifyGive(handle)` increment notification count, from task context.
@@ -370,26 +425,36 @@ static void handlerTask(void *unused) {
 **Use case:** App should run only when Wi-Fi connected **AND** sensor calibrated **AND** storage ready; or react when *any* fault flag set. Each condition gets one bit in `EventBits_t`; no payload or arrival count. Bits remain set until cleared; races require protocol.
 
 ```c
+// WIFI readiness ko bit 0 assign kiya.
 #define WIFI_BIT   (1U << 0)
+// Sensor readiness ko alag bit 1 assign kiya.
 #define SENSOR_BIT (1U << 1)
+// Event group multiple status flags ek jagah rakhta hai.
 static EventGroupHandle_t readyFlags;
 
 void network_task(void *arg) {
     (void)arg;
+    // Successful init ke baad hi ready bit set karna hai.
     wifi_connect();
+    // WIFI ready condition signal; same bit baar-baar set karna count nahi badhata.
     xEventGroupSetBits(readyFlags, WIFI_BIT);
+    // Current one-shot initialization task khatam, self-delete.
     vTaskDelete(NULL);
 }
 void app_task(void *arg) {
     (void)arg;
+    // App required conditions complete hone tak wait karegi.
     EventBits_t bits = xEventGroupWaitBits(
+        // Mask specify karta ki WIFI AUR SENSOR dono chahiye.
         readyFlags, WIFI_BIT | SENSOR_BIT,
-        pdFALSE,    // do NOT auto-clear flags
-        pdTRUE,     // wait for ALL requested bits
+        pdFALSE,    // flags ko automatically clear MAT karo
+        pdTRUE,     // saari requested conditions ka AND wait
         portMAX_DELAY
     );
     (void)bits;
+    // All required bits set hone ke baad run hota hai.
     run_app();
+    // Current one-shot initialization task khatam, self-delete.
     vTaskDelete(NULL);
 }
 ```
@@ -409,20 +474,28 @@ void app_task(void *arg) {
 **Use case:** Button press ke 5 seconds baad idle-off; repeated press par reset. Timer service task callbacks execute karta hai, **callback ke andar blocking/long loops mat karo**.
 
 ```c
+// Timer handle se 5s countdown restart ya cancel karenge.
 static TimerHandle_t idleTimer;
+// Callback timer service task mein run hota hai, ISR mein nahi.
 static void idle_cb(TimerHandle_t timer) {
     (void)timer;
-    // SHORT callback; no blocking
+    // Callback chhota rakho, blocking nahi.
+    // Callback short aur nonblocking rakho; heavy I/O worker task ko bhejo.
     turn_off_idle_indicator();
 }
 void timers_init(void) {
+    // One-shot 5s timer create: name, period, reload, ID, callback.
     idleTimer = xTimerCreate("idle", pdMS_TO_TICKS(5000),
+                             // pdFALSE = one-shot, auto-reload disabled.
                              pdFALSE, NULL, idle_cb);
+    // NULL ka matlab timer allocate nahi ho paya.
     configASSERT(idleTimer != NULL);
 }
 void on_button_press_task_context(void) {
-    // start if stopped / restart expiry if already active
+    // Stopped hai to start; active hai to countdown reset.
+    // Button dubara press: countdown reset; 10ms command-queue wait hai, timer period nahi.
     if (xTimerReset(idleTimer, pdMS_TO_TICKS(10)) != pdPASS) {
+        // Timer command reject/full ho to error note karo.
         record_timer_command_failure();
     }
 }
@@ -465,9 +538,12 @@ UART RX stream: bytes from one writer to one reader; no message boundaries. `xSt
 
 ```c
 void gpio_isr_example(void) {
+    // ISR wake flag pdFALSE initialize karo.
     BaseType_t hpw = pdFALSE;
+    // Task ko ISR-safe notification do; newly Ready high-priority task flag set kar sakti hai.
     vTaskNotifyGiveFromISR(handlerTaskHandle, &hpw);
-    portYIELD_FROM_ISR(hpw); // Check exact supported macro/port signature!
+    // ISR exit par prompt scheduling request; exact signature port-dependent hai.
+    portYIELD_FROM_ISR(hpw); // Apne port ka correct macro/signature check karo!
 }
 ```
 
